@@ -13,3 +13,7 @@ dist/
 release/
 /release.sh
 /x-ui
+balebot/balebot
+balebot/*.db
+balebot/*.db-shm
+balebot/*.db-wal

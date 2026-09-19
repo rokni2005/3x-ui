@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"balebot/bale"
+	"balebot/db"
 )
 
 const (
-	minWeightKg  = 0.5
-	maxWeightKg  = 30
 	weightStepKg = 0.5
+	maxWeightKg  = 30
 )
 
 // Config holds the deposit/payment details shown to customers.
@@ -24,17 +24,18 @@ type Config struct {
 	CardHolder    string
 }
 
-// Bot wires together the Bale API client, session store and business rules
-// for the fruit-ordering conversation.
+// Bot wires together the Bale API client, the persistent catalog/orders
+// store and per-chat session state for the fruit-ordering conversation.
 type Bot struct {
-	api   *bale.Client
-	store *Store
-	cfg   Config
+	api      *bale.Client
+	sessions *Store
+	data     *db.Store
+	cfg      Config
 }
 
 // New builds a Bot ready to Run.
-func New(api *bale.Client, cfg Config) *Bot {
-	return &Bot{api: api, store: NewStore(), cfg: cfg}
+func New(api *bale.Client, data *db.Store, cfg Config) *Bot {
+	return &Bot{api: api, sessions: NewStore(), data: data, cfg: cfg}
 }
 
 // Run starts the long-polling loop. It blocks until an unrecoverable error occurs.
@@ -74,7 +75,7 @@ func (b *Bot) handleUpdate(u bale.Update) {
 
 func (b *Bot) handleMessage(msg bale.Message) {
 	chatID := msg.Chat.ID
-	sess := b.store.Get(chatID)
+	sess := b.sessions.Get(chatID)
 	text := strings.TrimSpace(msg.Text)
 
 	if text == "/start" {
@@ -135,7 +136,7 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 	}
 	chatID := cq.Message.Chat.ID
 	messageID := cq.Message.MessageID
-	sess := b.store.Get(chatID)
+	sess := b.sessions.Get(chatID)
 	data := cq.Data
 
 	switch {
@@ -149,20 +150,25 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 
 	case strings.HasPrefix(data, "fruit:"):
 		id := strings.TrimPrefix(data, "fruit:")
-		fruit := FindFruit(id)
+		fruit, err := b.data.GetFruit(id)
+		if err != nil {
+			log.Printf("GetFruit(%s): %v", id, err)
+			b.api.AnswerCallbackQuery(cq.ID, "خطایی رخ داد، دوباره تلاش کنید", true)
+			return
+		}
 		if fruit == nil {
 			b.api.AnswerCallbackQuery(cq.ID, "این میوه یافت نشد", true)
 			return
 		}
 		sess.CurrentFruit = id
-		sess.CurrentWeight = 1
+		sess.CurrentWeight = fruit.MinWeightKg
 		sess.Stage = StageViewingFruit
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 		b.editFruitDetail(chatID, messageID, sess, fruit)
 
 	case data == "w:inc" || data == "w:dec":
-		fruit := FindFruit(sess.CurrentFruit)
-		if fruit == nil {
+		fruit, err := b.data.GetFruit(sess.CurrentFruit)
+		if err != nil || fruit == nil {
 			b.api.AnswerCallbackQuery(cq.ID, "", false)
 			return
 		}
@@ -173,8 +179,8 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			}
 		} else {
 			sess.CurrentWeight -= weightStepKg
-			if sess.CurrentWeight < minWeightKg {
-				sess.CurrentWeight = minWeightKg
+			if sess.CurrentWeight < fruit.MinWeightKg {
+				sess.CurrentWeight = fruit.MinWeightKg
 			}
 		}
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
@@ -182,12 +188,23 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 
 	case strings.HasPrefix(data, "add:"):
 		id := strings.TrimPrefix(data, "add:")
-		fruit := FindFruit(id)
+		fruit, err := b.data.GetFruit(id)
+		if err != nil {
+			log.Printf("GetFruit(%s): %v", id, err)
+			b.api.AnswerCallbackQuery(cq.ID, "خطایی رخ داد، دوباره تلاش کنید", true)
+			return
+		}
 		if fruit == nil {
 			b.api.AnswerCallbackQuery(cq.ID, "این میوه یافت نشد", true)
 			return
 		}
-		sess.AddToCart(id, sess.CurrentWeight)
+		sess.AddToCart(CartItem{
+			FruitID:    fruit.ID,
+			Emoji:      fruit.Emoji,
+			Name:       fruit.Name,
+			WeightKg:   sess.CurrentWeight,
+			PricePerKg: fruit.Price,
+		})
 		sess.Stage = StageBrowsing
 		b.api.AnswerCallbackQuery(cq.ID, fmt.Sprintf("%s %s به سبد خرید اضافه شد ✅", fruit.Emoji, fruit.Name), false)
 		b.editCatalog(chatID, messageID, sess)
@@ -222,12 +239,23 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 // ---- view builders ----
 
 func (b *Bot) sendCatalog(chatID int64, sess *Session) {
-	b.api.SendMessage(chatID, catalogText(sess), catalogKeyboard(sess))
+	fruits, err := b.data.ListFruits()
+	if err != nil {
+		log.Printf("ListFruits: %v", err)
+		b.api.SendMessage(chatID, "متاسفانه در حال حاضر امکان نمایش لیست میوه‌ها نیست. لطفا بعدا دوباره تلاش کنید.", nil)
+		return
+	}
+	b.api.SendMessage(chatID, catalogText(sess), catalogKeyboard(sess, fruits))
 }
 
 func (b *Bot) editCatalog(chatID, messageID int64, sess *Session) {
-	if err := b.api.EditMessageText(chatID, messageID, catalogText(sess), catalogKeyboard(sess)); err != nil {
-		b.api.SendMessage(chatID, catalogText(sess), catalogKeyboard(sess))
+	fruits, err := b.data.ListFruits()
+	if err != nil {
+		log.Printf("ListFruits: %v", err)
+		return
+	}
+	if err := b.api.EditMessageText(chatID, messageID, catalogText(sess), catalogKeyboard(sess, fruits)); err != nil {
+		b.api.SendMessage(chatID, catalogText(sess), catalogKeyboard(sess, fruits))
 	}
 }
 
@@ -240,15 +268,15 @@ func catalogText(sess *Session) string {
 	return sb.String()
 }
 
-func catalogKeyboard(sess *Session) *bale.InlineKeyboardMarkup {
+func catalogKeyboard(sess *Session, fruits []db.Fruit) *bale.InlineKeyboardMarkup {
 	var rows [][]bale.InlineKeyboardButton
-	for i := 0; i < len(Catalog); i += 2 {
+	for i := 0; i < len(fruits); i += 2 {
 		row := []bale.InlineKeyboardButton{
-			{Text: Catalog[i].Emoji + " " + Catalog[i].Name, CallbackData: "fruit:" + Catalog[i].ID},
+			{Text: fruits[i].Emoji + " " + fruits[i].Name, CallbackData: "fruit:" + fruits[i].ID},
 		}
-		if i+1 < len(Catalog) {
+		if i+1 < len(fruits) {
 			row = append(row, bale.InlineKeyboardButton{
-				Text: Catalog[i+1].Emoji + " " + Catalog[i+1].Name, CallbackData: "fruit:" + Catalog[i+1].ID,
+				Text: fruits[i+1].Emoji + " " + fruits[i+1].Name, CallbackData: "fruit:" + fruits[i+1].ID,
 			})
 		}
 		rows = append(rows, row)
@@ -261,15 +289,15 @@ func catalogKeyboard(sess *Session) *bale.InlineKeyboardMarkup {
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func fruitDetailText(sess *Session, fruit *Fruit) string {
+func fruitDetailText(sess *Session, fruit *db.Fruit) string {
 	amount := int(sess.CurrentWeight * float64(fruit.Price))
 	return fmt.Sprintf(
-		"%s %s درجه یک\nقیمت: %s تومان به ازای هر کیلو\n\nمقدار انتخابی: %s کیلوگرم\nمبلغ این قلم: %s تومان",
-		fruit.Emoji, fruit.Name, FormatToman(fruit.Price), FormatWeight(sess.CurrentWeight), FormatToman(amount),
+		"%s %s درجه یک\nقیمت: %s تومان به ازای هر کیلو\nحداقل سفارش: %s کیلوگرم\n\nمقدار انتخابی: %s کیلوگرم\nمبلغ این قلم: %s تومان",
+		fruit.Emoji, fruit.Name, FormatToman(fruit.Price), FormatWeight(fruit.MinWeightKg), FormatWeight(sess.CurrentWeight), FormatToman(amount),
 	)
 }
 
-func fruitDetailKeyboard(sess *Session, fruit *Fruit) *bale.InlineKeyboardMarkup {
+func fruitDetailKeyboard(sess *Session, fruit *db.Fruit) *bale.InlineKeyboardMarkup {
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
 		{
 			{Text: "➖", CallbackData: "w:dec"},
@@ -281,7 +309,7 @@ func fruitDetailKeyboard(sess *Session, fruit *Fruit) *bale.InlineKeyboardMarkup
 	}}
 }
 
-func (b *Bot) editFruitDetail(chatID, messageID int64, sess *Session, fruit *Fruit) {
+func (b *Bot) editFruitDetail(chatID, messageID int64, sess *Session, fruit *db.Fruit) {
 	if err := b.api.EditMessageText(chatID, messageID, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit)); err != nil {
 		b.api.SendMessage(chatID, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit))
 	}
@@ -291,12 +319,7 @@ func cartText(sess *Session) string {
 	var sb strings.Builder
 	sb.WriteString("🛒 سبد خرید شما:\n\n")
 	for _, item := range sess.Cart {
-		fruit := FindFruit(item.FruitID)
-		if fruit == nil {
-			continue
-		}
-		price := int(item.WeightKg * float64(fruit.Price))
-		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", fruit.Emoji, fruit.Name, FormatWeight(item.WeightKg), FormatToman(price)))
+		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
 	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان", FormatToman(sess.Total())))
 	return sb.String()
@@ -326,12 +349,7 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	var sb strings.Builder
 	sb.WriteString("🧾 فاکتور سفارش شما\n\n")
 	for _, item := range sess.Cart {
-		fruit := FindFruit(item.FruitID)
-		if fruit == nil {
-			continue
-		}
-		price := int(item.WeightKg * float64(fruit.Price))
-		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", fruit.Emoji, fruit.Name, FormatWeight(item.WeightKg), FormatToman(price)))
+		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
 	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان\n", FormatToman(total)))
 	sb.WriteString("🚚 ارسال ما رایگانه!\n\n")
@@ -345,6 +363,28 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 }
 
 func (b *Bot) finalizeOrder(chatID int64, sess *Session, receipt bale.Message) {
+	items := make([]db.OrderItem, 0, len(sess.Cart))
+	for _, item := range sess.Cart {
+		items = append(items, db.OrderItem{
+			FruitID:    item.FruitID,
+			Emoji:      item.Emoji,
+			Name:       item.Name,
+			WeightKg:   item.WeightKg,
+			PricePerKg: item.PricePerKg,
+		})
+	}
+	order := db.Order{
+		ChatID:  chatID,
+		Address: sess.Address,
+		Phone:   sess.Phone,
+		Items:   items,
+		Total:   sess.Total(),
+		Deposit: b.cfg.DepositAmount,
+	}
+	if _, err := b.data.SaveOrder(order); err != nil {
+		log.Printf("SaveOrder: %v", err)
+	}
+
 	b.api.SendMessage(chatID, "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿", nil)
 
 	if b.cfg.AdminChatID != 0 {
@@ -360,12 +400,7 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, receipt bale.Message) {
 func cartLinesOnly(sess *Session) string {
 	var sb strings.Builder
 	for _, item := range sess.Cart {
-		fruit := FindFruit(item.FruitID)
-		if fruit == nil {
-			continue
-		}
-		price := int(item.WeightKg * float64(fruit.Price))
-		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", fruit.Emoji, fruit.Name, FormatWeight(item.WeightKg), FormatToman(price)))
+		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

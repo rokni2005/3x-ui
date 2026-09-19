@@ -1,15 +1,20 @@
 // Command balebot runs a Bale Messenger bot that lets customers order fruit
 // online: browse the catalog, pick fruits and quantities, submit their
-// address and phone number, then see an invoice and pay a deposit.
+// address and phone number, then see an invoice and pay a deposit. Prices,
+// per-fruit minimum order weight and order history are persisted in SQLite
+// and can be managed from a small admin web panel.
 package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 
+	"balebot/admin"
 	"balebot/bale"
 	"balebot/bot"
+	"balebot/db"
 )
 
 func main() {
@@ -17,6 +22,13 @@ func main() {
 	if token == "" {
 		log.Fatal("BALE_BOT_TOKEN environment variable is required")
 	}
+
+	dbPath := getEnv("DB_PATH", "balebot.db")
+	store, err := db.Open(dbPath)
+	if err != nil {
+		log.Fatalf("opening database %s: %v", dbPath, err)
+	}
+	defer store.Close()
 
 	cfg := bot.Config{
 		DepositAmount: 200000,
@@ -38,13 +50,33 @@ func main() {
 		}
 	}
 
+	startAdminPanel(store)
+
 	client := bale.NewClient(token)
-	b := bot.New(client, cfg)
+	b := bot.New(client, store, cfg)
 
 	log.Println("fruit order bot is running...")
 	if err := b.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func startAdminPanel(store *db.Store) {
+	username := os.Getenv("ADMIN_USERNAME")
+	password := os.Getenv("ADMIN_PASSWORD")
+	if username == "" || password == "" {
+		log.Println("ADMIN_USERNAME/ADMIN_PASSWORD not set, admin panel disabled")
+		return
+	}
+
+	addr := getEnv("ADMIN_LISTEN_ADDR", ":8080")
+	server := admin.New(store, username, password)
+	go func() {
+		log.Printf("admin panel listening on %s", addr)
+		if err := http.ListenAndServe(addr, server.Handler()); err != nil {
+			log.Fatalf("admin panel failed: %v", err)
+		}
+	}()
 }
 
 func getEnv(key, def string) string {

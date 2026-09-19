@@ -15,10 +15,20 @@ const (
 	StageAwaitingReceipt
 )
 
-// CartItem is one fruit line in a customer's cart.
+// CartItem is one fruit line in a customer's cart. Price is frozen at the
+// moment the customer adds it, so a later admin price change never changes
+// an order already in progress.
 type CartItem struct {
-	FruitID  string
-	WeightKg float64
+	FruitID    string
+	Emoji      string
+	Name       string
+	WeightKg   float64
+	PricePerKg int
+}
+
+// LineTotal is this line's price in Toman.
+func (c CartItem) LineTotal() int {
+	return int(c.WeightKg * float64(c.PricePerKg))
 }
 
 // Session holds one customer's in-progress order.
@@ -31,25 +41,23 @@ type Session struct {
 	Phone         string
 }
 
-// AddToCart merges the given weight into an existing line for the same fruit,
-// or appends a new line.
-func (s *Session) AddToCart(fruitID string, weightKg float64) {
+// AddToCart merges the given weight into an existing line for the same
+// fruit, or appends a new line.
+func (s *Session) AddToCart(item CartItem) {
 	for i := range s.Cart {
-		if s.Cart[i].FruitID == fruitID {
-			s.Cart[i].WeightKg += weightKg
+		if s.Cart[i].FruitID == item.FruitID {
+			s.Cart[i].WeightKg += item.WeightKg
 			return
 		}
 	}
-	s.Cart = append(s.Cart, CartItem{FruitID: fruitID, WeightKg: weightKg})
+	s.Cart = append(s.Cart, item)
 }
 
 // Total returns the cart's total price in Toman.
 func (s *Session) Total() int {
 	total := 0
 	for _, item := range s.Cart {
-		if fruit := FindFruit(item.FruitID); fruit != nil {
-			total += int(item.WeightKg * float64(fruit.Price))
-		}
+		total += item.LineTotal()
 	}
 	return total
 }
