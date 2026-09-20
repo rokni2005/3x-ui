@@ -547,7 +547,10 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 		summary := fmt.Sprintf("📦 سفارش جدید\n\n%s\n\nجمع کل: %s تومان\nودیعه: %s تومان\n📍 آدرس: %s\n📞 تماس: %s",
 			cartLinesOnly(sess), FormatToman(sess.Total()), FormatToman(b.cfg.DepositAmount), sess.Address, sess.Phone)
 		b.api.SendMessage(b.cfg.AdminChatID, summary, adminMenuKeyboard())
-		if trigger != nil {
+		// Only the manual card-receipt flow has anything worth forwarding
+		// (the photo itself); a successful_payment update carries no
+		// forwardable message of its own.
+		if trigger != nil && len(trigger.Photo) > 0 {
 			b.api.ForwardMessage(b.cfg.AdminChatID, chatID, trigger.MessageID)
 		}
 	}

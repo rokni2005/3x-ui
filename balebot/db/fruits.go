@@ -71,3 +71,24 @@ func (s *Store) UpdateFruitPhoto(id, photoPath string) error {
 	`, photoPath, id)
 	return err
 }
+
+// AddFruit inserts a brand-new catalog item, placed after every existing
+// one in display order.
+func (s *Store) AddFruit(id, emoji, name string, price int, minWeightKg float64) error {
+	var nextOrder int
+	if err := s.conn.QueryRow(`SELECT COALESCE(MAX(sort_order), -1) + 1 FROM fruits`).Scan(&nextOrder); err != nil {
+		return err
+	}
+	_, err := s.conn.Exec(`
+		INSERT INTO fruits (id, emoji, name, price, min_weight_kg, sort_order)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, id, emoji, name, price, minWeightKg, nextOrder)
+	return err
+}
+
+// DeleteFruit removes a catalog item. Orders that already reference it keep
+// their frozen line items (items_json), so past orders are unaffected.
+func (s *Store) DeleteFruit(id string) error {
+	_, err := s.conn.Exec(`DELETE FROM fruits WHERE id = ?`, id)
+	return err
+}

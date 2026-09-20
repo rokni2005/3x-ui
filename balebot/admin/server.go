@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"balebot/bot"
 	"balebot/db"
@@ -37,6 +39,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.auth(s.handleRoot))
 	mux.HandleFunc("/fruits", s.auth(s.handleFruits))
 	mux.HandleFunc("/fruits/update", s.auth(s.handleUpdateFruit))
+	mux.HandleFunc("/fruits/add", s.auth(s.handleAddFruit))
+	mux.HandleFunc("/fruits/delete", s.auth(s.handleDeleteFruit))
 	mux.HandleFunc("/photo", s.auth(s.handlePhoto))
 	mux.HandleFunc("/orders", s.auth(s.handleOrders))
 	mux.HandleFunc("/orders/confirm", s.auth(s.handleConfirmOrder))
@@ -84,7 +88,7 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 	.msg.err { background:#fdecea; color:#b3261e; }
 	.header-row, .fruit-row {
 		display:grid;
-		grid-template-columns: 56px 1.6fr 1fr 1fr 1.4fr 90px;
+		grid-template-columns: 56px 1.6fr 1fr 1fr 1.4fr 130px;
 		gap:12px;
 		align-items:center;
 		padding:10px 12px;
@@ -106,12 +110,35 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 		display:flex; align-items:center; justify-content:center; font-size:20px; color:#bbb;
 	}
 	.list { border:1px solid #e0e0e0; border-radius:10px; overflow:hidden; }
+	.fruit-row .del { background:#b3261e; margin-inline-start:6px; }
+	.add-box {
+		background:#fff; border:1px solid #e0e0e0; border-radius:10px; padding:16px;
+		margin-bottom:20px;
+	}
+	.add-box h2 { font-size:15px; margin:0 0 12px; }
+	.add-grid { display:grid; grid-template-columns: 90px 70px 1.4fr 1fr 1fr auto; gap:10px; align-items:end; }
+	.add-grid label { display:block; font-size:12px; color:#666; margin-bottom:4px; }
+	.add-grid input { width:100%; box-sizing:border-box; padding:7px 8px; border:1px solid #ccc; border-radius:6px; }
+	.add-grid button { padding:8px 14px; border:none; border-radius:6px; background:#2e7d32; color:#fff; cursor:pointer; }
 </style>
 </head>
 <body>
 	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a></nav>
 	<h1>🍉 مدیریت قیمت، حداقل وزن و عکس میوه‌ها</h1>
 	{{if .Message}}<div class="msg {{.MessageClass}}">{{.Message}}</div>{{end}}
+
+	<div class="add-box">
+		<h2>➕ افزودن میوه جدید</h2>
+		<form class="add-grid" method="post" action="/fruits/add">
+			<div><label>شناسه (لاتین)</label><input type="text" name="id" placeholder="e.g. lemon" pattern="[a-z0-9_]+" required></div>
+			<div><label>اموجی</label><input type="text" name="emoji" placeholder="🍋" required></div>
+			<div><label>نام</label><input type="text" name="name" placeholder="لیمو" required></div>
+			<div><label>قیمت (تومان/کیلو)</label><input type="number" name="price" min="0" step="1000" required></div>
+			<div><label>حداقل سفارش (کیلوگرم)</label><input type="number" name="min_weight" min="0.1" step="0.1" value="0.5" required></div>
+			<div><button type="submit">افزودن</button></div>
+		</form>
+	</div>
+
 	<div class="list">
 		<div class="header-row">
 			<div></div><div>میوه</div><div>قیمت (تومان/کیلو)</div><div>حداقل سفارش (کیلوگرم)</div><div>عکس</div><div></div>
@@ -128,7 +155,11 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 			<div><input type="number" name="price" value="{{.Price}}" min="0" step="1000" required></div>
 			<div><input type="number" name="min_weight" value="{{weight .MinWeightKg}}" min="0.1" step="0.1" required></div>
 			<div><input type="file" name="photo" accept="image/jpeg,image/png,image/webp"></div>
-			<div><button type="submit">ذخیره</button></div>
+			<div style="display:flex; gap:6px;">
+				<button type="submit">ذخیره</button>
+				<button class="del" type="submit" formaction="/fruits/delete" formnovalidate
+					onclick="return confirm('میوه «{{.Name}}» حذف بشه؟');">🗑</button>
+			</div>
 		</form>
 		{{end}}
 	</div>
@@ -205,6 +236,69 @@ func (s *Server) handleUpdateFruit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/fruits?status=ok", http.StatusFound)
 }
 
+var fruitIDPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+func (s *Server) handleAddFruit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+
+	id := strings.TrimSpace(r.FormValue("id"))
+	emoji := strings.TrimSpace(r.FormValue("emoji"))
+	name := strings.TrimSpace(r.FormValue("name"))
+	price, priceErr := strconv.Atoi(strings.TrimSpace(r.FormValue("price")))
+	minWeight, weightErr := strconv.ParseFloat(strings.TrimSpace(r.FormValue("min_weight")), 64)
+
+	if !fruitIDPattern.MatchString(id) || emoji == "" || name == "" ||
+		priceErr != nil || weightErr != nil || price < 0 || minWeight <= 0 || minWeight > 50 {
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+
+	if existing, err := s.data.GetFruit(id); err != nil {
+		log.Printf("admin: GetFruit(%s) before add: %v", id, err)
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	} else if existing != nil {
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+
+	if err := s.data.AddFruit(id, emoji, name, price, minWeight); err != nil {
+		log.Printf("admin: AddFruit(%s): %v", id, err)
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/fruits?status=ok", http.StatusFound)
+}
+
+func (s *Server) handleDeleteFruit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == "" {
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+	if err := s.data.DeleteFruit(id); err != nil {
+		log.Printf("admin: DeleteFruit(%s): %v", id, err)
+		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/fruits?status=ok", http.StatusFound)
+}
+
 // maybeSavePhoto stores an uploaded "photo" file, if one was submitted.
 // A missing file is not an error: the photo field is optional on every save.
 func (s *Server) maybeSavePhoto(r *http.Request, fruitID string) error {
@@ -255,61 +349,99 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 	body { font-family: Tahoma, sans-serif; background:#f6f7f4; margin:0; padding:24px; color:#222; }
 	h1 { font-size:20px; }
 	nav a { margin-inline-end:16px; color:#2e7d32; text-decoration:none; font-weight:bold; }
-	table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; }
-	th, td { padding:10px 12px; border-bottom:1px solid #e0e0e0; text-align:right; vertical-align:top; }
-	th { background:#f0f0f0; }
 	.empty { padding:16px; color:#777; }
-	.status { display:inline-block; padding:3px 8px; border-radius:6px; font-size:12px; white-space:nowrap; }
-	.status.pending { background:#fff4e0; color:#8a5a00; }
-	.status.confirmed { background:#e6f4ea; color:#1e7e34; }
-	.status.shipped { background:#e3f0fd; color:#0b5ed7; }
-	.actions form { display:inline; }
-	.actions button { padding:6px 10px; margin:2px 0; border:none; border-radius:6px; background:#2e7d32; color:#fff; cursor:pointer; font-size:12px; display:block; width:100%; box-sizing:border-box; }
-	.actions button.ship { background:#0b5ed7; }
-	.loc a { display:block; font-size:12px; margin-top:4px; }
+	.range-tabs { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+	.range-tabs a {
+		padding:7px 14px; border-radius:20px; background:#fff; border:1px solid #ddd;
+		color:#444; text-decoration:none; font-size:13px;
+	}
+	.range-tabs a.active { background:#2e7d32; border-color:#2e7d32; color:#fff; font-weight:bold; }
+	.cards { display:flex; flex-direction:column; gap:14px; }
+	.card {
+		background:#fff; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.06);
+		overflow:hidden; display:flex; flex-direction:column;
+	}
+	.card .head {
+		display:flex; justify-content:space-between; align-items:center;
+		padding:12px 14px; border-bottom:1px solid #f0f0f0;
+	}
+	.card .head .id { font-weight:bold; }
+	.card .head .time { font-size:12px; color:#888; }
+	.stepper { display:flex; align-items:center; padding:10px 14px; gap:4px; font-size:12px; }
+	.stepper .step { padding:3px 8px; border-radius:12px; background:#eee; color:#888; white-space:nowrap; }
+	.stepper .step.done { background:#e6f4ea; color:#1e7e34; }
+	.stepper .step.current { background:#2e7d32; color:#fff; font-weight:bold; }
+	.stepper .sep { flex:1; height:2px; background:#eee; margin:0 2px; min-width:8px; }
+	.body { padding:0 14px 12px; font-size:13px; }
+	.body .items { color:#333; margin-bottom:6px; }
+	.body .totals { display:flex; gap:16px; color:#444; margin-bottom:6px; }
+	.body .meta { color:#666; }
+	.loc { padding:0 14px 12px; font-size:12px; }
+	.loc a { color:#0b5ed7; margin-inline-end:14px; }
 	.loc .snapp { color:#888; }
-	.loc .none { color:#999; font-size:12px; }
+	.loc .none { color:#999; }
+	.card-actions { margin-top:auto; padding:12px 14px; background:#fafafa; border-top:1px solid #f0f0f0; }
+	.card-actions form { margin:0; }
+	.card-actions button {
+		width:100%; padding:12px; border:none; border-radius:8px; background:#2e7d32; color:#fff;
+		font-size:14px; font-weight:bold; cursor:pointer;
+	}
+	.card-actions button.ship { background:#0b5ed7; }
+	.card-actions .done-note { color:#888; font-size:12px; text-align:center; }
 </style>
 </head>
 <body>
 	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a></nav>
-	<h1>📦 سفارش‌های اخیر</h1>
+	<h1>📦 سفارش‌ها</h1>
+	<div class="range-tabs">
+		<a href="/orders?range=today" class="{{if eq .Range "today"}}active{{end}}">امروز</a>
+		<a href="/orders?range=week" class="{{if eq .Range "week"}}active{{end}}">این هفته</a>
+		<a href="/orders?range=month" class="{{if eq .Range "month"}}active{{end}}">این ماه</a>
+		<a href="/orders?range=all" class="{{if eq .Range "all"}}active{{end}}">همه</a>
+	</div>
 	{{if not .Orders}}
-		<div class="empty">هنوز سفارشی ثبت نشده است.</div>
+		<div class="empty">سفارشی در این بازه ثبت نشده است.</div>
 	{{else}}
-	<table>
-		<tr><th>#</th><th>زمان</th><th>وضعیت</th><th>اقلام</th><th>جمع کل</th><th>ودیعه</th><th>آدرس</th><th>تماس</th><th>لوکیشن پیک</th><th>عملیات</th></tr>
+	<div class="cards">
 		{{range .Orders}}
-		<tr>
-			<td>{{.ID}}</td>
-			<td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
-			<td><span class="status {{.Status}}">{{.StatusLabel}}</span></td>
-			<td>{{range .Items}}{{.Emoji}} {{.Name}} ({{weight .WeightKg}} کیلو)<br>{{end}}</td>
-			<td>{{toman .Total}} تومان</td>
-			<td>{{toman .Deposit}} تومان</td>
-			<td>{{.Address}}</td>
-			<td>{{.Phone}}</td>
-			<td class="loc">
+		<div class="card">
+			<div class="head">
+				<span class="id">سفارش #{{.ID}}</span>
+				<span class="time">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
+			</div>
+			<div class="stepper">
+				<span class="step {{if or (eq .Status "confirmed") (eq .Status "shipped")}}done{{else}}current{{end}}">⏳ در انتظار تایید</span>
+				<span class="sep"></span>
+				<span class="step {{if eq .Status "shipped"}}done{{else if eq .Status "confirmed"}}current{{end}}">✅ تایید شده</span>
+				<span class="sep"></span>
+				<span class="step {{if eq .Status "shipped"}}current{{end}}">🚚 ارسال شده</span>
+			</div>
+			<div class="body">
+				<div class="items">{{range .Items}}{{.Emoji}} {{.Name}} ({{weight .WeightKg}} کیلو) &nbsp;{{end}}</div>
+				<div class="totals"><span>جمع کل: {{toman .Total}} تومان</span><span>ودیعه: {{toman .Deposit}} تومان</span></div>
+				<div class="meta">📍 {{.Address}} &nbsp;|&nbsp; 📞 {{.Phone}}</div>
+			</div>
+			<div class="loc">
 				{{if .HasLocation}}
-					<a target="_blank" href="https://www.google.com/maps?q={{.CustomerLat}},{{.CustomerLng}}">📍 روی نقشه</a>
+					<a target="_blank" href="https://www.google.com/maps?q={{.CustomerLat}},{{.CustomerLng}}">📍 لوکیشن مشتری روی نقشه</a>
 					<a class="snapp" target="_blank" href="snapp://origin?lat={{.CustomerLat}}&lng={{.CustomerLng}}">🛵 تلاش برای باز کردن اسنپ‌باکس*</a>
-				{{else}}
-					<span class="none">—</span>
+				{{else if eq .Status "shipped"}}
+					<span class="none">در انتظار دریافت لوکیشن از مشتری…</span>
 				{{end}}
-			</td>
-			<td class="actions">
+			</div>
+			<div class="card-actions">
 				{{if eq .Status "pending"}}
 				<form method="post" action="/orders/confirm"><input type="hidden" name="id" value="{{.ID}}"><button type="submit">✅ تایید سفارش</button></form>
 				{{else if eq .Status "confirmed"}}
-				<form method="post" action="/orders/ship"><input type="hidden" name="id" value="{{.ID}}"><button class="ship" type="submit">🚚 ارسال شد</button></form>
+				<form method="post" action="/orders/ship"><input type="hidden" name="id" value="{{.ID}}"><button class="ship" type="submit">🚚 ارسال شد (درخواست لوکیشن از مشتری)</button></form>
 				{{else}}
-				&mdash;
+				<div class="done-note">✅ فرآیند این سفارش کامل شده</div>
 				{{end}}
-			</td>
-		</tr>
+			</div>
+		</div>
 		{{end}}
-	</table>
-	<p style="color:#888; font-size:12px; margin-top:12px;">
+	</div>
+	<p style="color:#888; font-size:12px; margin-top:14px;">
 		* لینک اسنپ‌باکس آزمایشی است؛ چون Snapp مستندات عمومی رسمی برای این deep link منتشر نکرده، مطمئن نیستیم روی گوشی شما باز می‌شه یا نه — اگه کار نکرد، از لینک «روی نقشه» برای دیدن مختصات و باز کردن دستی اسنپ‌باکس استفاده کنید.
 	</p>
 	{{end}}
@@ -319,18 +451,58 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 
 type ordersPageData struct {
 	Orders []db.Order
+	Range  string
+}
+
+// tehran is used to compute "today"/"this week"/"this month" boundaries in
+// the shop's own timezone rather than UTC (orders.created_at is stored in
+// UTC, but "today" should mean today in Iran).
+var tehran = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Tehran")
+	if err != nil {
+		log.Printf("admin: loading Asia/Tehran timezone: %v (falling back to UTC+3:30)", err)
+		return time.FixedZone("Asia/Tehran", 3*60*60+30*60)
+	}
+	return loc
+}()
+
+// rangeSince returns the start of the requested range in the shop's
+// timezone, or a zero time for "all" (no filtering).
+func rangeSince(rangeKey string) time.Time {
+	now := time.Now().In(tehran)
+	y, m, d := now.Date()
+	startOfDay := time.Date(y, m, d, 0, 0, 0, 0, tehran)
+	switch rangeKey {
+	case "today":
+		return startOfDay
+	case "week":
+		// Iran's week starts Saturday; time.Weekday Saturday = 6.
+		daysSinceSaturday := (int(now.Weekday()) - int(time.Saturday) + 7) % 7
+		return startOfDay.AddDate(0, 0, -daysSinceSaturday)
+	case "month":
+		return time.Date(y, m, 1, 0, 0, 0, 0, tehran)
+	default:
+		return time.Time{}
+	}
 }
 
 func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
-	orders, err := s.data.ListRecentOrders(100)
+	rangeKey := r.URL.Query().Get("range")
+	switch rangeKey {
+	case "today", "week", "month":
+	default:
+		rangeKey = "all"
+	}
+
+	orders, err := s.data.ListOrdersSince(rangeSince(rangeKey), 200)
 	if err != nil {
 		http.Error(w, "خطا در خواندن سفارش‌ها", http.StatusInternalServerError)
-		log.Printf("admin: ListRecentOrders: %v", err)
+		log.Printf("admin: ListOrdersSince: %v", err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := ordersTemplate.Execute(w, ordersPageData{Orders: orders}); err != nil {
+	if err := ordersTemplate.Execute(w, ordersPageData{Orders: orders, Range: rangeKey}); err != nil {
 		log.Printf("admin: render orders: %v", err)
 	}
 }

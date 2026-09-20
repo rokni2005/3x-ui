@@ -123,6 +123,31 @@ func (s *Store) ListRecentOrders(limit int) ([]Order, error) {
 	return orders, rows.Err()
 }
 
+// ListOrdersSince returns orders created at or after `since`, newest first.
+// A zero `since` returns every order (still capped at limit).
+func (s *Store) ListOrdersSince(since time.Time, limit int) ([]Order, error) {
+	rows, err := s.conn.Query(fmt.Sprintf(`
+		SELECT %s FROM orders
+		WHERE created_at >= ?
+		ORDER BY id DESC
+		LIMIT ?
+	`, orderColumns), since.UTC().Format("2006-01-02 15:04:05"), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orders []Order
+	for rows.Next() {
+		o, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, o)
+	}
+	return orders, rows.Err()
+}
+
 // UpdateOrderStatus moves an order to a new status (see the Status*
 // constants). It doesn't validate the transition; callers decide which
 // buttons make sense to show for the order's current status.
