@@ -39,6 +39,12 @@ type Session struct {
 	CurrentWeight float64
 	Address       string
 	Phone         string
+
+	// AwaitingLocationForOrder is set to a placed order's ID while we've
+	// asked the customer (after the admin marked that order shipped) to
+	// share their live location, so a plain incoming location message can
+	// be attributed to the right order. Zero means no location is pending.
+	AwaitingLocationForOrder int64
 }
 
 // AddToCart merges the given weight into an existing line for the same
@@ -51,6 +57,31 @@ func (s *Session) AddToCart(item CartItem) {
 		}
 	}
 	s.Cart = append(s.Cart, item)
+}
+
+// RemoveFromCart drops the cart line for the given fruit entirely.
+func (s *Session) RemoveFromCart(fruitID string) {
+	for i := range s.Cart {
+		if s.Cart[i].FruitID == fruitID {
+			s.Cart = append(s.Cart[:i], s.Cart[i+1:]...)
+			return
+		}
+	}
+}
+
+// DecreaseInCart reduces the cart line for fruitID by one weight step,
+// removing the line entirely once its weight would drop to zero or below.
+func (s *Session) DecreaseInCart(fruitID string, stepKg float64) {
+	for i := range s.Cart {
+		if s.Cart[i].FruitID != fruitID {
+			continue
+		}
+		s.Cart[i].WeightKg -= stepKg
+		if s.Cart[i].WeightKg <= 0 {
+			s.Cart = append(s.Cart[:i], s.Cart[i+1:]...)
+		}
+		return
+	}
 }
 
 // Total returns the cart's total price in Toman.

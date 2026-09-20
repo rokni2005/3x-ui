@@ -61,8 +61,6 @@ func main() {
 		}
 	}
 
-	startAdminPanel(store)
-
 	client := bale.NewClient(token)
 	client.Debug = os.Getenv("DEBUG_UPDATES") == "1"
 	if client.Debug {
@@ -73,13 +71,15 @@ func main() {
 	}
 	b := bot.New(client, store, cfg)
 
+	startAdminPanel(store, b)
+
 	log.Println("fruit order bot is running...")
 	if err := b.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func startAdminPanel(store *db.Store) {
+func startAdminPanel(store *db.Store, b *bot.Bot) {
 	username := os.Getenv("ADMIN_USERNAME")
 	password := os.Getenv("ADMIN_PASSWORD")
 	if username == "" || password == "" {
@@ -90,7 +90,7 @@ func startAdminPanel(store *db.Store) {
 	// Bound to localhost by default: reach it via `ssh -L 8080:127.0.0.1:8080`,
 	// not by exposing it on the public interface.
 	addr := getEnv("ADMIN_LISTEN_ADDR", "127.0.0.1:8080")
-	server := admin.New(store, username, password)
+	server := admin.New(store, b, username, password)
 	go func() {
 		log.Printf("admin panel listening on %s", addr)
 		if err := http.ListenAndServe(addr, server.Handler()); err != nil {

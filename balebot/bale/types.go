@@ -18,6 +18,13 @@ type PhotoSize struct {
 	FileID string `json:"file_id"`
 }
 
+// Location is a geographic point shared by a user, e.g. in response to a
+// request_location reply-keyboard button.
+type Location struct {
+	Longitude float64 `json:"longitude"`
+	Latitude  float64 `json:"latitude"`
+}
+
 // Message is a Bale message, mirroring the Telegram-compatible Bot API.
 type Message struct {
 	MessageID         int64              `json:"message_id"`
@@ -25,6 +32,7 @@ type Message struct {
 	Chat              Chat               `json:"chat"`
 	Text              string             `json:"text"`
 	Photo             []PhotoSize        `json:"photo"`
+	Location          *Location          `json:"location,omitempty"`
 	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
 }
 
@@ -81,8 +89,11 @@ type InlineKeyboardMarkup struct {
 }
 
 // KeyboardButton is one button of a persistent, chat-wide reply keyboard.
+// RequestLocation, when true, makes tapping the button share the user's
+// current location as a message instead of sending the button's text.
 type KeyboardButton struct {
-	Text string `json:"text"`
+	Text            string `json:"text"`
+	RequestLocation bool   `json:"request_location,omitempty"`
 }
 
 // ReplyKeyboardMarkup shows a persistent keyboard below the chat's text

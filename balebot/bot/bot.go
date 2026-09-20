@@ -129,6 +129,11 @@ func (b *Bot) handleMessage(msg bale.Message) {
 
 	sess := b.sessions.Get(chatID)
 
+	if msg.Location != nil && sess.AwaitingLocationForOrder != 0 {
+		b.handleShipmentLocation(chatID, sess, *msg.Location)
+		return
+	}
+
 	if msg.SuccessfulPayment != nil {
 		b.finalizeOrder(chatID, sess, &msg)
 		return
@@ -275,6 +280,18 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		sess.Stage = StageBrowsing
 		b.api.AnswerCallbackQuery(cq.ID, fmt.Sprintf("%s %s به سبد خرید اضافه شد ✅", fruit.Emoji, fruit.Name), false)
 		b.editCatalog(chatID, messageID, sess)
+
+	case strings.HasPrefix(data, "cart:dec:"):
+		id := strings.TrimPrefix(data, "cart:dec:")
+		sess.DecreaseInCart(id, weightStepKg)
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.editCart(chatID, messageID, sess)
+
+	case strings.HasPrefix(data, "cart:rm:"):
+		id := strings.TrimPrefix(data, "cart:rm:")
+		sess.RemoveFromCart(id)
+		b.api.AnswerCallbackQuery(cq.ID, "حذف شد", false)
+		b.editCart(chatID, messageID, sess)
 
 	case data == "cart:view":
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
@@ -425,16 +442,26 @@ func cartText(sess *Session) string {
 	return sb.String()
 }
 
-func cartKeyboard() *bale.InlineKeyboardMarkup {
-	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
-		{{Text: "➕ افزودن میوه دیگر", CallbackData: "back:menu"}},
-		{{Text: "✅ ثبت آدرس و ادامه سفارش", CallbackData: "cart:checkout"}},
-	}}
+// cartKeyboard shows a ➖/🗑 pair per cart line (decrease by one step, or
+// drop the line entirely) above the usual add-more/checkout buttons.
+func cartKeyboard(sess *Session) *bale.InlineKeyboardMarkup {
+	var rows [][]bale.InlineKeyboardButton
+	for _, item := range sess.Cart {
+		rows = append(rows, []bale.InlineKeyboardButton{
+			{Text: fmt.Sprintf("➖ کم کردن %s %s", item.Emoji, item.Name), CallbackData: "cart:dec:" + item.FruitID},
+			{Text: "🗑 حذف", CallbackData: "cart:rm:" + item.FruitID},
+		})
+	}
+	rows = append(rows,
+		[]bale.InlineKeyboardButton{{Text: "➕ افزودن میوه دیگر", CallbackData: "back:menu"}},
+		[]bale.InlineKeyboardButton{{Text: "✅ ثبت آدرس و ادامه سفارش", CallbackData: "cart:checkout"}},
+	)
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 func (b *Bot) editCart(chatID, messageID int64, sess *Session) {
-	if err := b.api.EditMessageText(chatID, messageID, cartText(sess), cartKeyboard()); err != nil {
-		b.api.SendMessage(chatID, cartText(sess), cartKeyboard())
+	if err := b.api.EditMessageText(chatID, messageID, cartText(sess), cartKeyboard(sess)); err != nil {
+		b.api.SendMessage(chatID, cartText(sess), cartKeyboard(sess))
 	}
 }
 
@@ -526,6 +553,56 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 	}
 
 	sess.resetOrder()
+}
+
+// ---- admin-panel-triggered notifications ----
+//
+// The admin web panel calls these when the admin confirms an order or marks
+// it shipped, so the customer hears about it inside the same Bale chat.
+
+// NotifyOrderConfirmed tells a customer their order has been checked and confirmed.
+func (b *Bot) NotifyOrderConfirmed(chatID, orderID int64) {
+	b.api.SendMessage(chatID, fmt.Sprintf("✅ سفارش شما (#%d) بررسی و تایید شد. به‌زودی برای ارسال آماده می‌شود.", orderID), nil)
+}
+
+// RequestShipmentLocation tells a customer their order is out for delivery
+// and asks them to share their live location, so the admin can hand it to
+// a courier with the right destination. The customer's next location
+// message is picked up in handleMessage via Session.AwaitingLocationForOrder.
+func (b *Bot) RequestShipmentLocation(chatID, orderID int64) {
+	sess := b.sessions.Get(chatID)
+	sess.AwaitingLocationForOrder = orderID
+	b.api.SendMessage(chatID,
+		fmt.Sprintf("🚚 سفارش شما (#%d) برای ارسال آماده شد!\nلطفا برای هماهنگی دقیق پیک، روی دکمه پایین بزنید تا لوکیشن فعلی‌تان برای ما ارسال شود:", orderID),
+		locationRequestKeyboard(),
+	)
+}
+
+func locationRequestKeyboard() *bale.ReplyKeyboardMarkup {
+	return &bale.ReplyKeyboardMarkup{
+		Keyboard:       [][]bale.KeyboardButton{{{Text: "📍 ارسال لوکیشن من", RequestLocation: true}}},
+		ResizeKeyboard: true,
+	}
+}
+
+// handleShipmentLocation saves the customer's shared location against the
+// order the admin marked shipped, and lets both sides know it arrived.
+func (b *Bot) handleShipmentLocation(chatID int64, sess *Session, loc bale.Location) {
+	orderID := sess.AwaitingLocationForOrder
+	sess.AwaitingLocationForOrder = 0
+
+	if err := b.data.SaveOrderLocation(orderID, loc.Latitude, loc.Longitude); err != nil {
+		log.Printf("SaveOrderLocation(%d): %v", orderID, err)
+	}
+	b.api.SendMessage(chatID, "📍 لوکیشن شما دریافت شد. سفارش شما به‌زودی توسط پیک تحویل داده می‌شود 🙏", customerMenuKeyboard())
+
+	if b.cfg.AdminChatID != 0 {
+		mapLink := fmt.Sprintf("https://www.google.com/maps?q=%f,%f", loc.Latitude, loc.Longitude)
+		b.api.SendMessage(b.cfg.AdminChatID,
+			fmt.Sprintf("📍 لوکیشن مشتری برای سفارش #%d رسید:\n%s\n\nاین مختصات رو می‌تونید توی پنل ادمین (بخش سفارش‌ها) هم ببینید و از اونجا برای باز کردن اسنپ‌باکس استفاده کنید.", orderID, mapLink),
+			adminMenuKeyboard(),
+		)
+	}
 }
 
 // ---- reply keyboards (persistent, chat-wide "buttons instead of commands") ----

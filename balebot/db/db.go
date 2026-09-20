@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS orders (
 	items_json  TEXT NOT NULL,
 	total       INTEGER NOT NULL,
 	deposit     INTEGER NOT NULL,
+	status      TEXT NOT NULL DEFAULT 'pending',
 	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `
@@ -60,6 +61,16 @@ func Open(path, photosDir string) (*Store, error) {
 	if err := addColumnIfMissing(conn, "fruits", "photo_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("db: migrate fruits.photo_path: %w", err)
+	}
+	for _, col := range []struct{ name, def string }{
+		{"status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"customer_lat", "REAL"},
+		{"customer_lng", "REAL"},
+	} {
+		if err := addColumnIfMissing(conn, "orders", col.name, col.def); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("db: migrate orders.%s: %w", col.name, err)
+		}
 	}
 
 	store := &Store{conn: conn, photosDir: photosDir}
