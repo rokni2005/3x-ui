@@ -45,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/orders", s.auth(s.handleOrders))
 	mux.HandleFunc("/orders/confirm", s.auth(s.handleConfirmOrder))
 	mux.HandleFunc("/orders/ship", s.auth(s.handleShipOrder))
+	mux.HandleFunc("/orders/verify-payment", s.auth(s.handleVerifyPayment))
 	mux.HandleFunc("/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/wallets", s.auth(s.handleWallets))
 	mux.HandleFunc("/wallets/update", s.auth(s.handleUpdateWallet))
@@ -423,9 +424,20 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 				<div class="items">{{range .Items}}{{.Emoji}} {{.Name}} ({{weight .WeightKg}} کیلو) &nbsp;{{end}}</div>
 				<div class="totals">
 					<span>جمع کل: {{toman .Total}} تومان</span>
-					<span>پرداخت‌شده: {{toman .Deposit}} تومان</span>
-					{{if gt .Remaining 0}}<span style="color:#b3261e;">باقی‌مانده: {{toman .Remaining}} تومان</span>{{end}}
+					{{if .PaymentVerified}}
+						<span>پرداخت‌شده: {{toman .Deposit}} تومان</span>
+						{{if gt .Remaining 0}}<span style="color:#b3261e;">باقی‌مانده: {{toman .Remaining}} تومان</span>{{end}}
+					{{else}}
+						<span style="color:#b3261e;">⚠️ فیش کارت‌به‌کارت در انتظار بررسی</span>
+					{{end}}
 				</div>
+				{{if not .PaymentVerified}}
+				<form method="post" action="/orders/verify-payment" style="display:flex; gap:6px; margin-top:8px; max-width:320px;">
+					<input type="hidden" name="id" value="{{.ID}}">
+					<input type="number" name="amount" placeholder="مبلغ واریزی طبق فیش (تومان)" min="0" step="1000" required style="flex:1; padding:6px 8px; border:1px solid #ccc; border-radius:6px;">
+					<button type="submit" style="padding:6px 12px; border:none; border-radius:6px; background:#2e7d32; color:#fff; cursor:pointer; font-size:12px;">ثبت</button>
+				</form>
+				{{end}}
 				<div class="meta">📍 {{.Address}} &nbsp;|&nbsp; 📞 {{.Phone}}</div>
 			</div>
 			<div class="loc">
@@ -559,6 +571,37 @@ func (s *Server) handleShipOrder(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.bot.ShipOrder(id); err != nil {
 			log.Printf("admin: ShipOrder(%d): %v", id, err)
 		}
+	}
+	http.Redirect(w, r, "/orders", http.StatusFound)
+}
+
+// handleVerifyPayment records the amount the admin actually saw on a
+// card-to-card receipt: it marks the order's payment verified and credits
+// the customer's wallet debt by that amount (the debt defaulted to the
+// full order total when the unverified receipt was first finalized).
+func (s *Server) handleVerifyPayment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/orders", http.StatusFound)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil {
+		log.Printf("admin: verify payment: bad id: %v", err)
+		http.Redirect(w, r, "/orders", http.StatusFound)
+		return
+	}
+	amount, err := strconv.Atoi(strings.TrimSpace(r.FormValue("amount")))
+	if err != nil || amount < 0 {
+		log.Printf("admin: verify payment: bad amount: %v", err)
+		http.Redirect(w, r, "/orders", http.StatusFound)
+		return
+	}
+	if err := s.data.ConfirmManualPayment(id, amount); err != nil {
+		log.Printf("admin: ConfirmManualPayment(%d, %d): %v", id, amount, err)
 	}
 	http.Redirect(w, r, "/orders", http.StatusFound)
 }

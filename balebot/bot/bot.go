@@ -426,22 +426,32 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		amount := b.cfg.DepositAmount
 		payload := depositInvoicePayload
 		label := "ودیعه سفارش"
-		amountDesc := "بابت ودیعه سفارش"
 		if full {
 			amount = sess.Total()
 			payload = fullInvoicePayload
 			label = "مبلغ کامل سفارش"
-			amountDesc = "بابت کل سفارش"
 		}
 
-		if b.cfg.PaymentProviderToken != "" {
-			b.sendPaymentInvoice(chatID, payload, amount, label)
-			return
+		// Online wallet payment: Bale confirms the exact amount via
+		// successful_payment, so the draft is marked verified right away.
+		if _, err := b.createDraftOrder(chatID, sess, amount, true); err != nil {
+			log.Printf("CreateDraftOrder(%d): %v", chatID, err)
+		}
+		b.sendPaymentInvoice(chatID, payload, amount, label)
+
+	case data == "pay:manual":
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		// Manual card-to-card transfer: nothing is confirmed until the
+		// admin reviews the receipt photo, so record it unverified with
+		// nothing paid yet — the whole order total counts as owed until
+		// then (see db.Order.Remaining / ConfirmManualPayment).
+		if _, err := b.createDraftOrder(chatID, sess, 0, false); err != nil {
+			log.Printf("CreateDraftOrder(%d): %v", chatID, err)
 		}
 		sess.Stage = StageAwaitingReceipt
 		text := fmt.Sprintf(
-			"لطفا مبلغ %s تومان %s را به شماره کارت زیر واریز کنید:\n\n💳 %s\nبه نام: %s\n\nپس از واریز، لطفا تصویر رسید پرداخت را همینجا ارسال کنید تا سفارش شما نهایی شود.",
-			FormatToman(amount), amountDesc, b.cfg.CardNumber, b.cfg.CardHolder,
+			"لطفا مبلغ %s تومان بابت ودیعه سفارش را به شماره کارت زیر واریز کنید:\n\n💳 %s\nبه نام: %s\n\nپس از واریز، لطفا تصویر رسید پرداخت را همینجا ارسال کنید. سفارش شما ثبت می‌شود و پس از بررسی فیش توسط ادمین نهایی خواهد شد.",
+			FormatToman(b.cfg.DepositAmount), b.cfg.CardNumber, b.cfg.CardHolder,
 		)
 		b.api.SendMessage(chatID, text, nil)
 
@@ -671,11 +681,17 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	sb.WriteString(fmt.Sprintf("برای ثبت نهایی سفارش، مبلغ %s تومان بابت ودیعه پرداخت می‌شود و مابقی مبلغ (%s تومان) پس از تحویل سفارش دریافت خواهد شد.\n\n", FormatToman(deposit), FormatToman(remaining)))
 	sb.WriteString(fmt.Sprintf("📍 آدرس: %s\n📞 شماره تماس: %s", sess.Address, sess.Phone))
 
-	keyboard := &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
-		{{Text: fmt.Sprintf("💳 پرداخت ودیعه (%s تومان)", FormatToman(deposit)), CallbackData: "pay:deposit"}},
-		{{Text: fmt.Sprintf("💰 پرداخت کامل مبلغ (%s تومان)", FormatToman(total)), CallbackData: "pay:full"}},
-	}}
-	b.api.SendMessage(chatID, sb.String(), keyboard)
+	var rows [][]bale.InlineKeyboardButton
+	if b.cfg.PaymentProviderToken != "" {
+		rows = append(rows,
+			[]bale.InlineKeyboardButton{{Text: fmt.Sprintf("💳 پرداخت ودیعه با کیف‌پول (%s تومان)", FormatToman(deposit)), CallbackData: "pay:deposit"}},
+			[]bale.InlineKeyboardButton{{Text: fmt.Sprintf("💰 پرداخت کامل با کیف‌پول (%s تومان)", FormatToman(total)), CallbackData: "pay:full"}},
+		)
+	}
+	rows = append(rows, []bale.InlineKeyboardButton{
+		{Text: fmt.Sprintf("🏦 واریز کارت‌به‌کارت (ودیعه %s تومان)", FormatToman(deposit)), CallbackData: "pay:manual"},
+	})
+	b.api.SendMessage(chatID, sb.String(), &bale.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
 // sendPaymentInvoice asks Bale to charge the customer's wallet via a native
@@ -702,13 +718,13 @@ func (b *Bot) sendPaymentInvoice(chatID int64, payload string, amountToman int, 
 	}
 }
 
-func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) {
-	if len(sess.Cart) == 0 {
-		// Nothing to finalize: most likely a duplicate successful_payment
-		// or receipt-photo delivery for an order already completed.
-		return
-	}
-
+// createDraftOrder snapshots the customer's cart/address/phone to the
+// database the moment they commit to a payment method, so the checkout
+// survives a bot restart even though the in-memory session cart doesn't.
+// paidAmount/verified describe what's confirmed so far: the full amount and
+// true for an online wallet payment, or 0 and false for an unverified
+// card-to-card receipt.
+func (b *Bot) createDraftOrder(chatID int64, sess *Session, paidAmount int, verified bool) (int64, error) {
 	items := make([]db.OrderItem, 0, len(sess.Cart))
 	for _, item := range sess.Cart {
 		items = append(items, db.OrderItem{
@@ -719,42 +735,87 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 			PricePerKg: item.PricePerKg,
 		})
 	}
-	total := sess.Total()
-	paid := b.cfg.DepositAmount
-	if sess.PayingFull {
-		paid = total
-	}
-	if paid > total {
-		paid = total
-	}
-	remaining := total - paid
+	return b.data.CreateDraftOrder(db.Order{
+		ChatID:          chatID,
+		Address:         sess.Address,
+		Phone:           sess.Phone,
+		Items:           items,
+		Total:           sess.Total(),
+		Deposit:         paidAmount,
+		PaymentVerified: verified,
+	})
+}
 
-	order := db.Order{
-		ChatID:  chatID,
-		Address: sess.Address,
-		Phone:   sess.Phone,
-		Items:   items,
-		Total:   total,
-		Deposit: paid,
-	}
-	orderID, err := b.data.SaveOrder(order)
+// finalizeOrder is called once a payment actually completes (a wallet
+// successful_payment) or a card-to-card receipt photo arrives. It reads the
+// order back from the draft created at checkout time (createDraftOrder)
+// rather than trusting the in-memory session, so a bot restart between
+// "customer tapped pay" and "payment/receipt arrived" can't silently lose
+// the order the way relying on sess.Cart alone would.
+func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) {
+	draft, err := b.data.GetLatestDraftOrder(chatID)
 	if err != nil {
-		log.Printf("SaveOrder: %v", err)
+		log.Printf("GetLatestDraftOrder(%d): %v", chatID, err)
 	}
-	order.ID = orderID
-	order.Status = db.StatusPending
 
+	var order db.Order
+	if draft != nil {
+		if err := b.data.UpdateOrderStatus(draft.ID, db.StatusPending); err != nil {
+			log.Printf("UpdateOrderStatus(%d, pending): %v", draft.ID, err)
+		}
+		order = *draft
+		order.Status = db.StatusPending
+	} else {
+		// No draft on record (e.g. bot restarted before the draft could be
+		// written, or this is a stray duplicate delivery) — fall back to
+		// whatever the session still has, same as before this existed.
+		if len(sess.Cart) == 0 {
+			return
+		}
+		items := make([]db.OrderItem, 0, len(sess.Cart))
+		for _, item := range sess.Cart {
+			items = append(items, db.OrderItem{
+				FruitID: item.FruitID, Emoji: item.Emoji, Name: item.Name,
+				WeightKg: item.WeightKg, PricePerKg: item.PricePerKg,
+			})
+		}
+		total := sess.Total()
+		paid := b.cfg.DepositAmount
+		if sess.PayingFull {
+			paid = total
+		}
+		if paid > total {
+			paid = total
+		}
+		order = db.Order{
+			ChatID: chatID, Address: sess.Address, Phone: sess.Phone,
+			Items: items, Total: total, Deposit: paid, PaymentVerified: true,
+		}
+		id, err := b.data.SaveOrder(order)
+		if err != nil {
+			log.Printf("SaveOrder: %v", err)
+		}
+		order.ID = id
+		order.Status = db.StatusPending
+	}
+
+	remaining := order.Remaining()
 	if remaining > 0 {
 		if err := b.data.AddToWalletDebt(chatID, remaining); err != nil {
 			log.Printf("AddToWalletDebt(%d): %v", chatID, err)
 		}
 	}
 
-	confirmation := "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
-	if trigger != nil && trigger.SuccessfulPayment != nil {
+	var confirmation string
+	switch {
+	case !order.PaymentVerified:
+		confirmation = "✅ رسید شما دریافت شد. سفارش شما ثبت شد و پس از بررسی فیش واریزی توسط ادمین نهایی می‌شود. همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+	case trigger != nil && trigger.SuccessfulPayment != nil:
 		confirmation = "✅ پرداخت با موفقیت انجام شد و سفارش شما ثبت شد. همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+	default:
+		confirmation = "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
 	}
-	if remaining > 0 {
+	if order.PaymentVerified && remaining > 0 {
 		confirmation += fmt.Sprintf("\n\nمبلغ باقی‌مانده (%s تومان) پس از تحویل سفارش دریافت می‌شود.", FormatToman(remaining))
 	}
 	b.api.SendMessage(chatID, confirmation, nil)
@@ -791,9 +852,14 @@ func adminOrderText(o db.Order) string {
 	for _, item := range o.Items {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
 	}
-	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان\nپرداخت‌شده: %s تومان", FormatToman(o.Total), FormatToman(o.Deposit)))
-	if o.Remaining() > 0 {
-		sb.WriteString(fmt.Sprintf("\nباقی‌مانده (دریافت هنگام تحویل): %s تومان", FormatToman(o.Remaining())))
+	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان", FormatToman(o.Total)))
+	if !o.PaymentVerified {
+		sb.WriteString("\n⚠️ فیش کارت‌به‌کارت در انتظار بررسیه — مبلغ واریزی رو از پنل وب (بخش سفارش‌ها) ثبت کنید.")
+	} else {
+		sb.WriteString(fmt.Sprintf("\nپرداخت‌شده: %s تومان", FormatToman(o.Deposit)))
+		if o.Remaining() > 0 {
+			sb.WriteString(fmt.Sprintf("\nباقی‌مانده (دریافت هنگام تحویل): %s تومان", FormatToman(o.Remaining())))
+		}
 	}
 	sb.WriteString(fmt.Sprintf("\n📍 %s\n📞 %s", o.Address, o.Phone))
 	if o.HasLocation() {
