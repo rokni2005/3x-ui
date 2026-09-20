@@ -46,6 +46,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/orders/confirm", s.auth(s.handleConfirmOrder))
 	mux.HandleFunc("/orders/ship", s.auth(s.handleShipOrder))
 	mux.HandleFunc("/stats", s.auth(s.handleStats))
+	mux.HandleFunc("/wallets", s.auth(s.handleWallets))
+	mux.HandleFunc("/wallets/update", s.auth(s.handleUpdateWallet))
+	mux.HandleFunc("/wallets/zero", s.auth(s.handleZeroWallet))
 	return mux
 }
 
@@ -123,7 +126,7 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
 	<h1>🍉 مدیریت قیمت، حداقل وزن و عکس میوه‌ها</h1>
 	{{if .Message}}<div class="msg {{.MessageClass}}">{{.Message}}</div>{{end}}
 
@@ -391,7 +394,7 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
 	<h1>📦 سفارش‌ها</h1>
 	<div class="range-tabs">
 		<a href="/orders?range=today" class="{{if eq .Range "today"}}active{{end}}">امروز</a>
@@ -406,7 +409,7 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 		{{range .Orders}}
 		<div class="card">
 			<div class="head">
-				<span class="id">سفارش #{{.ID}}</span>
+				<span class="id">سفارش #{{.ID}}{{if .CustomerName}} — {{.CustomerName}}{{end}}</span>
 				<span class="time">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
 			</div>
 			<div class="stepper">
@@ -418,7 +421,11 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 			</div>
 			<div class="body">
 				<div class="items">{{range .Items}}{{.Emoji}} {{.Name}} ({{weight .WeightKg}} کیلو) &nbsp;{{end}}</div>
-				<div class="totals"><span>جمع کل: {{toman .Total}} تومان</span><span>ودیعه: {{toman .Deposit}} تومان</span></div>
+				<div class="totals">
+					<span>جمع کل: {{toman .Total}} تومان</span>
+					<span>پرداخت‌شده: {{toman .Deposit}} تومان</span>
+					{{if gt .Remaining 0}}<span style="color:#b3261e;">باقی‌مانده: {{toman .Remaining}} تومان</span>{{end}}
+				</div>
 				<div class="meta">📍 {{.Address}} &nbsp;|&nbsp; 📞 {{.Phone}}</div>
 			</div>
 			<div class="loc">
@@ -507,36 +514,32 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) parseOrderIDForm(r *http.Request) (int64, *db.Order, error) {
+func (s *Server) parseOrderIDForm(r *http.Request) (int64, error) {
 	if err := r.ParseForm(); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
-	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
-	if err != nil {
-		return 0, nil, err
-	}
-	order, err := s.data.GetOrder(id)
-	if err != nil {
-		return id, nil, err
-	}
-	return id, order, nil
+	return strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
 }
 
+// handleConfirmOrder and handleShipOrder delegate the actual status change
+// and customer notification to *bot.Bot (bot.ConfirmOrder/ShipOrder), the
+// same methods the admin's own Bale-chat buttons use, so both surfaces stay
+// in sync.
 func (s *Server) handleConfirmOrder(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id, order, err := s.parseOrderIDForm(r)
-	if err != nil || order == nil {
-		log.Printf("admin: confirm order %d: %v", id, err)
+	id, err := s.parseOrderIDForm(r)
+	if err != nil {
+		log.Printf("admin: confirm order: %v", err)
 		http.Redirect(w, r, "/orders", http.StatusFound)
 		return
 	}
-	if err := s.data.UpdateOrderStatus(id, db.StatusConfirmed); err != nil {
-		log.Printf("admin: UpdateOrderStatus(%d, confirmed): %v", id, err)
-	} else if s.bot != nil {
-		s.bot.NotifyOrderConfirmed(order.ChatID, id)
+	if s.bot != nil {
+		if _, err := s.bot.ConfirmOrder(id); err != nil {
+			log.Printf("admin: ConfirmOrder(%d): %v", id, err)
+		}
 	}
 	http.Redirect(w, r, "/orders", http.StatusFound)
 }
@@ -546,16 +549,16 @@ func (s *Server) handleShipOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id, order, err := s.parseOrderIDForm(r)
-	if err != nil || order == nil {
-		log.Printf("admin: ship order %d: %v", id, err)
+	id, err := s.parseOrderIDForm(r)
+	if err != nil {
+		log.Printf("admin: ship order: %v", err)
 		http.Redirect(w, r, "/orders", http.StatusFound)
 		return
 	}
-	if err := s.data.UpdateOrderStatus(id, db.StatusShipped); err != nil {
-		log.Printf("admin: UpdateOrderStatus(%d, shipped): %v", id, err)
-	} else if s.bot != nil {
-		s.bot.RequestShipmentLocation(order.ChatID, id)
+	if s.bot != nil {
+		if _, err := s.bot.ShipOrder(id); err != nil {
+			log.Printf("admin: ShipOrder(%d): %v", id, err)
+		}
 	}
 	http.Redirect(w, r, "/orders", http.StatusFound)
 }
@@ -578,12 +581,12 @@ var statsTemplate = template.Must(template.New("stats").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
 	<h1>📊 آمار سفارش‌ها</h1>
 	<div class="cards">
 		<div class="card"><div class="n">{{.TotalOrders}}</div><div class="l">کل سفارش‌ها</div></div>
 		<div class="card"><div class="n">{{toman .TotalRevenue}}</div><div class="l">جمع کل فروش (تومان)</div></div>
-		<div class="card"><div class="n">{{toman .TotalDeposits}}</div><div class="l">جمع ودیعه‌های دریافتی (تومان)</div></div>
+		<div class="card"><div class="n">{{toman .TotalDeposits}}</div><div class="l">جمع مبالغ دریافتی (تومان)</div></div>
 		<div class="card"><div class="n">{{.PendingCount}}</div><div class="l">⏳ در انتظار تایید</div></div>
 		<div class="card"><div class="n">{{.ConfirmedCount}}</div><div class="l">✅ تایید شده</div></div>
 		<div class="card"><div class="n">{{.ShippedCount}}</div><div class="l">🚚 ارسال شده</div></div>
@@ -603,4 +606,137 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if err := statsTemplate.Execute(w, stats); err != nil {
 		log.Printf("admin: render stats: %v", err)
 	}
+}
+
+var walletsTemplate = template.Must(template.New("wallets").Funcs(funcMap).Parse(`
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>کیف‌پول مشتری‌ها</title>
+<style>
+	body { font-family: Tahoma, sans-serif; background:#f6f7f4; margin:0; padding:24px; color:#222; }
+	h1 { font-size:20px; }
+	nav a { margin-inline-end:16px; color:#2e7d32; text-decoration:none; font-weight:bold; }
+	.empty { padding:16px; color:#777; }
+	.list { border:1px solid #e0e0e0; border-radius:10px; overflow:hidden; background:#fff; }
+	.row {
+		display:grid; grid-template-columns: 1fr 130px 140px 100px; gap:12px; align-items:center;
+		padding:12px 14px; border-bottom:1px solid #e0e0e0;
+	}
+	.row .name { font-weight:bold; }
+	.row .chatid { font-size:12px; color:#888; }
+	.row .debt { color:#b3261e; font-weight:bold; }
+	.row input {
+		width:100%; box-sizing:border-box; padding:6px 8px; border:1px solid #ccc; border-radius:6px;
+	}
+	.row button {
+		padding:7px 10px; border:none; border-radius:6px; background:#2e7d32; color:#fff; cursor:pointer; font-size:12px;
+	}
+	.row .zero { background:#666; margin-inline-start:4px; }
+	.note { color:#888; font-size:12px; margin-top:12px; }
+</style>
+</head>
+<body>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
+	<h1>👛 کیف‌پول مشتری‌ها (مبلغ باقی‌مانده بدهکاری)</h1>
+	{{if not .Customers}}
+		<div class="empty">هیچ مشتری‌ای در حال حاضر بدهی باقی‌مانده ندارد.</div>
+	{{else}}
+	<div class="list">
+		{{range .Customers}}
+		<div class="row">
+			<div>
+				<div class="name">{{.FullName}}</div>
+				<div class="chatid">chat id: {{.ChatID}}</div>
+			</div>
+			<div class="debt">{{toman .WalletDebt}} تومان</div>
+			<form method="post" action="/wallets/update" style="display:flex; gap:6px;">
+				<input type="hidden" name="chat_id" value="{{.ChatID}}">
+				<input type="number" name="amount" value="{{.WalletDebt}}" step="1000">
+				<button type="submit">ذخیره</button>
+			</form>
+			<form method="post" action="/wallets/zero" onsubmit="return confirm('بدهی {{.FullName}} صفر بشه؟');">
+				<input type="hidden" name="chat_id" value="{{.ChatID}}">
+				<button class="zero" type="submit">🔄 صفر کردن</button>
+			</form>
+		</div>
+		{{end}}
+	</div>
+	{{end}}
+	<p class="note">این مبلغ همون باقی‌مونده‌ی سفارش‌هاییه که مشتری فقط ودیعه پرداخت کرده. وقتی هنگام تحویل بقیه پول رو نقدی/کارتی گرفتید، بزنید «صفر کردن».</p>
+</body>
+</html>
+`))
+
+type walletsPageData struct {
+	Customers []db.Customer
+}
+
+func (s *Server) handleWallets(w http.ResponseWriter, r *http.Request) {
+	customers, err := s.data.ListCustomersWithDebt()
+	if err != nil {
+		http.Error(w, "خطا در خواندن کیف‌پول‌ها", http.StatusInternalServerError)
+		log.Printf("admin: ListCustomersWithDebt: %v", err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := walletsTemplate.Execute(w, walletsPageData{Customers: customers}); err != nil {
+		log.Printf("admin: render wallets: %v", err)
+	}
+}
+
+func (s *Server) parseWalletForm(r *http.Request) (chatID int64, amount int, err error) {
+	if err = r.ParseForm(); err != nil {
+		return 0, 0, err
+	}
+	chatID, err = strconv.ParseInt(strings.TrimSpace(r.FormValue("chat_id")), 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	amountStr := strings.TrimSpace(r.FormValue("amount"))
+	if amountStr == "" {
+		return chatID, 0, nil
+	}
+	amount, err = strconv.Atoi(amountStr)
+	return chatID, amount, err
+}
+
+func (s *Server) handleUpdateWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	chatID, amount, err := s.parseWalletForm(r)
+	if err != nil {
+		log.Printf("admin: update wallet: %v", err)
+		http.Redirect(w, r, "/wallets", http.StatusFound)
+		return
+	}
+	if err := s.data.SetWalletDebt(chatID, amount); err != nil {
+		log.Printf("admin: SetWalletDebt(%d, %d): %v", chatID, amount, err)
+	}
+	http.Redirect(w, r, "/wallets", http.StatusFound)
+}
+
+func (s *Server) handleZeroWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/wallets", http.StatusFound)
+		return
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("chat_id")), 10, 64)
+	if err != nil {
+		log.Printf("admin: zero wallet: %v", err)
+		http.Redirect(w, r, "/wallets", http.StatusFound)
+		return
+	}
+	if err := s.data.SetWalletDebt(chatID, 0); err != nil {
+		log.Printf("admin: SetWalletDebt(%d, 0): %v", chatID, err)
+	}
+	http.Redirect(w, r, "/wallets", http.StatusFound)
 }

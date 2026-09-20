@@ -6,7 +6,8 @@ import "sync"
 type Stage int
 
 const (
-	StageBrowsing Stage = iota
+	StageAwaitingName Stage = iota
+	StageBrowsing
 	StageViewingFruit
 	StageCart
 	StageAwaitingAddress
@@ -39,6 +40,11 @@ type Session struct {
 	CurrentWeight float64
 	Address       string
 	Phone         string
+
+	// PayingFull is true when the customer chose to pay the whole order
+	// total at checkout instead of just the deposit; finalizeOrder uses it
+	// to decide whether any remaining balance goes on their wallet debt.
+	PayingFull bool
 
 	// AwaitingLocationForOrder is set to a placed order's ID while we've
 	// asked the customer (after the admin marked that order shipped) to
@@ -101,6 +107,7 @@ func (s *Session) resetOrder() {
 	s.CurrentWeight = 0
 	s.Address = ""
 	s.Phone = ""
+	s.PayingFull = false
 }
 
 // Store keeps one Session per chat, guarded by a mutex since updates are

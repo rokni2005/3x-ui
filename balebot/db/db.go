@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS orders (
 	status      TEXT NOT NULL DEFAULT 'pending',
 	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS customers (
+	chat_id     INTEGER PRIMARY KEY,
+	first_name  TEXT NOT NULL DEFAULT '',
+	last_name   TEXT NOT NULL DEFAULT '',
+	wallet_debt INTEGER NOT NULL DEFAULT 0,
+	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // Store wraps the SQLite connection used by the bot and the admin panel.

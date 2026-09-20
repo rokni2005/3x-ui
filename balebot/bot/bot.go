@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,10 +17,13 @@ const (
 	weightStepKg = 0.5
 	maxWeightKg  = 30
 
-	// depositInvoicePayload identifies our one and only invoice type; kept
-	// short and constant since the deposit amount is a fixed shop-wide
-	// setting, not per-order.
+	// depositInvoicePayload/fullInvoicePayload identify which of the two
+	// checkout options a payment is for. The deposit amount is a fixed
+	// shop-wide setting; the full-payment amount varies per order, so it's
+	// looked up from the customer's session (by chat ID) when a
+	// pre_checkout_query for it arrives.
 	depositInvoicePayload = "deposit"
+	fullInvoicePayload    = "full"
 
 	// Persistent reply-keyboard button labels. Tapping one of these sends
 	// its exact text back to the bot as an ordinary message, so neither
@@ -104,8 +108,18 @@ func (b *Bot) handleUpdate(u bale.Update) {
 // (payload and amount), since accepting a mismatched charge would collect
 // the wrong amount from the customer.
 func (b *Bot) handlePreCheckoutQuery(q bale.PreCheckoutQuery) {
-	expected := b.cfg.DepositAmount * b.cfg.PaymentAmountMultiplier
-	if q.InvoicePayload != depositInvoicePayload || q.TotalAmount != expected {
+	var expectedToman int
+	switch q.InvoicePayload {
+	case depositInvoicePayload:
+		expectedToman = b.cfg.DepositAmount
+	case fullInvoicePayload:
+		expectedToman = b.sessions.Get(q.From.ID).Total()
+	default:
+		expectedToman = -1 // unknown payload: never matches, always rejected below
+	}
+
+	expected := expectedToman * b.cfg.PaymentAmountMultiplier
+	if q.TotalAmount != expected {
 		if err := b.api.AnswerPreCheckoutQuery(q.ID, false, "مبلغ پرداخت با سفارش مطابقت ندارد. لطفا دوباره تلاش کنید."); err != nil {
 			log.Printf("AnswerPreCheckoutQuery (reject): %v", err)
 		}
@@ -141,12 +155,39 @@ func (b *Bot) handleMessage(msg bale.Message) {
 
 	if text == "/start" || text == customerMenuButton {
 		sess.resetOrder()
+		customer, err := b.data.GetCustomer(chatID)
+		if err != nil {
+			log.Printf("GetCustomer(%d): %v", chatID, err)
+		}
+		if customer == nil || customer.FirstName == "" {
+			sess.Stage = StageAwaitingName
+			b.api.SendMessage(chatID, "🍇 سلام! به سفارش آنلاین میوه خوش آمدید.\nبرای شروع، لطفا نام و نام خانوادگی خود را وارد کنید:", nil)
+			return
+		}
 		b.api.SendMessage(chatID, "🍇 سلام! به سفارش آنلاین میوه خوش آمدید.\nهر وقت خواستید به این منو برگردید، کافیه دکمه پایین صفحه رو بزنید 👇", customerMenuKeyboard())
 		b.sendCatalog(chatID, sess)
 		return
 	}
 
 	switch sess.Stage {
+	case StageAwaitingName:
+		if len([]rune(text)) < 3 {
+			b.api.SendMessage(chatID, "لطفا نام و نام خانوادگی خود را کامل وارد کنید:", nil)
+			return
+		}
+		parts := strings.SplitN(text, " ", 2)
+		firstName := parts[0]
+		lastName := ""
+		if len(parts) > 1 {
+			lastName = strings.TrimSpace(parts[1])
+		}
+		if err := b.data.UpsertCustomer(chatID, firstName, lastName); err != nil {
+			log.Printf("UpsertCustomer(%d): %v", chatID, err)
+		}
+		sess.Stage = StageBrowsing
+		b.api.SendMessage(chatID, fmt.Sprintf("خوش اومدید %s 🌿\nهر وقت خواستید به این منو برگردید، کافیه دکمه پایین صفحه رو بزنید 👇", firstName), customerMenuKeyboard())
+		b.sendCatalog(chatID, sess)
+
 	case StageAwaitingAddress:
 		if len([]rune(text)) < 10 {
 			b.api.SendMessage(chatID, "لطفا آدرس کامل و دقیق خود را وارد کنید (حداقل شامل شهر، خیابان و پلاک):", nil)
@@ -306,22 +347,63 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
 
-	case data == "pay:deposit":
+	case data == "pay:deposit" || data == "pay:full":
+		full := data == "pay:full"
+		sess.PayingFull = full
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
+
+		amount := b.cfg.DepositAmount
+		payload := depositInvoicePayload
+		label := "ودیعه سفارش"
+		amountDesc := "بابت ودیعه سفارش"
+		if full {
+			amount = sess.Total()
+			payload = fullInvoicePayload
+			label = "مبلغ کامل سفارش"
+			amountDesc = "بابت کل سفارش"
+		}
+
 		if b.cfg.PaymentProviderToken != "" {
-			b.sendDepositInvoice(chatID)
+			b.sendPaymentInvoice(chatID, payload, amount, label)
 			return
 		}
 		sess.Stage = StageAwaitingReceipt
 		text := fmt.Sprintf(
-			"لطفا مبلغ %s تومان بابت ودیعه سفارش را به شماره کارت زیر واریز کنید:\n\n💳 %s\nبه نام: %s\n\nپس از واریز، لطفا تصویر رسید پرداخت را همینجا ارسال کنید تا سفارش شما نهایی شود.",
-			FormatToman(b.cfg.DepositAmount), b.cfg.CardNumber, b.cfg.CardHolder,
+			"لطفا مبلغ %s تومان %s را به شماره کارت زیر واریز کنید:\n\n💳 %s\nبه نام: %s\n\nپس از واریز، لطفا تصویر رسید پرداخت را همینجا ارسال کنید تا سفارش شما نهایی شود.",
+			FormatToman(amount), amountDesc, b.cfg.CardNumber, b.cfg.CardHolder,
 		)
 		b.api.SendMessage(chatID, text, nil)
+
+	case chatID == b.cfg.AdminChatID && strings.HasPrefix(data, "admin:confirm:"):
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		order, err := b.ConfirmOrder(parseOrderID(strings.TrimPrefix(data, "admin:confirm:")))
+		if err != nil || order == nil {
+			log.Printf("ConfirmOrder: %v", err)
+			return
+		}
+		if err := b.api.EditMessageText(chatID, messageID, adminOrderText(*order), adminOrderKeyboard(*order)); err != nil {
+			log.Printf("EditMessageText (confirm order #%d): %v", order.ID, err)
+		}
+
+	case chatID == b.cfg.AdminChatID && strings.HasPrefix(data, "admin:ship:"):
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		order, err := b.ShipOrder(parseOrderID(strings.TrimPrefix(data, "admin:ship:")))
+		if err != nil || order == nil {
+			log.Printf("ShipOrder: %v", err)
+			return
+		}
+		if err := b.api.EditMessageText(chatID, messageID, adminOrderText(*order), adminOrderKeyboard(*order)); err != nil {
+			log.Printf("EditMessageText (ship order #%d): %v", order.ID, err)
+		}
 
 	default:
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 	}
+}
+
+func parseOrderID(s string) int64 {
+	id, _ := strconv.ParseInt(s, 10, 64)
+	return id
 }
 
 // ---- view builders ----
@@ -485,22 +567,28 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 
 	keyboard := &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
 		{{Text: fmt.Sprintf("💳 پرداخت ودیعه (%s تومان)", FormatToman(deposit)), CallbackData: "pay:deposit"}},
+		{{Text: fmt.Sprintf("💰 پرداخت کامل مبلغ (%s تومان)", FormatToman(total)), CallbackData: "pay:full"}},
 	}}
 	b.api.SendMessage(chatID, sb.String(), keyboard)
 }
 
-// sendDepositInvoice asks Bale to charge the customer's wallet for the
-// deposit via a native invoice, instead of the manual card-transfer flow.
-func (b *Bot) sendDepositInvoice(chatID int64) {
-	amount := b.cfg.DepositAmount * b.cfg.PaymentAmountMultiplier
+// sendPaymentInvoice asks Bale to charge the customer's wallet via a native
+// invoice, instead of the manual card-transfer flow. payload is either
+// depositInvoicePayload or fullInvoicePayload, and amountToman is in Toman
+// (converted to the currency's smallest unit via PaymentAmountMultiplier).
+func (b *Bot) sendPaymentInvoice(chatID int64, payload string, amountToman int, label string) {
+	title := "پرداخت ودیعه سفارش میوه"
+	description := fmt.Sprintf("ودیعه سفارش شما (%s تومان). مابقی مبلغ پس از تحویل سفارش دریافت می‌شود.", FormatToman(amountToman))
+	if payload == fullInvoicePayload {
+		title = "پرداخت سفارش میوه"
+		description = fmt.Sprintf("مبلغ کامل سفارش شما (%s تومان).", FormatToman(amountToman))
+	}
+
+	amount := amountToman * b.cfg.PaymentAmountMultiplier
 	_, err := b.api.SendInvoice(
-		chatID,
-		"پرداخت ودیعه سفارش میوه",
-		fmt.Sprintf("ودیعه سفارش شما (%s تومان). مابقی مبلغ پس از تحویل سفارش دریافت می‌شود.", FormatToman(b.cfg.DepositAmount)),
-		depositInvoicePayload,
-		b.cfg.PaymentProviderToken,
-		b.cfg.PaymentCurrency,
-		[]bale.LabeledPrice{{Label: "ودیعه سفارش", Amount: amount}},
+		chatID, title, description, payload,
+		b.cfg.PaymentProviderToken, b.cfg.PaymentCurrency,
+		[]bale.LabeledPrice{{Label: label, Amount: amount}},
 	)
 	if err != nil {
 		log.Printf("SendInvoice: %v", err)
@@ -525,28 +613,53 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 			PricePerKg: item.PricePerKg,
 		})
 	}
+	total := sess.Total()
+	paid := b.cfg.DepositAmount
+	if sess.PayingFull {
+		paid = total
+	}
+	if paid > total {
+		paid = total
+	}
+	remaining := total - paid
+
 	order := db.Order{
 		ChatID:  chatID,
 		Address: sess.Address,
 		Phone:   sess.Phone,
 		Items:   items,
-		Total:   sess.Total(),
-		Deposit: b.cfg.DepositAmount,
+		Total:   total,
+		Deposit: paid,
 	}
-	if _, err := b.data.SaveOrder(order); err != nil {
+	orderID, err := b.data.SaveOrder(order)
+	if err != nil {
 		log.Printf("SaveOrder: %v", err)
+	}
+	order.ID = orderID
+	order.Status = db.StatusPending
+
+	if remaining > 0 {
+		if err := b.data.AddToWalletDebt(chatID, remaining); err != nil {
+			log.Printf("AddToWalletDebt(%d): %v", chatID, err)
+		}
 	}
 
 	confirmation := "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
 	if trigger != nil && trigger.SuccessfulPayment != nil {
-		confirmation = "✅ پرداخت ودیعه با موفقیت انجام شد و سفارش شما ثبت شد. همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+		confirmation = "✅ پرداخت با موفقیت انجام شد و سفارش شما ثبت شد. همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+	}
+	if remaining > 0 {
+		confirmation += fmt.Sprintf("\n\nمبلغ باقی‌مانده (%s تومان) پس از تحویل سفارش دریافت می‌شود.", FormatToman(remaining))
 	}
 	b.api.SendMessage(chatID, confirmation, nil)
 
 	if b.cfg.AdminChatID != 0 {
-		summary := fmt.Sprintf("📦 سفارش جدید\n\n%s\n\nجمع کل: %s تومان\nودیعه: %s تومان\n📍 آدرس: %s\n📞 تماس: %s",
-			cartLinesOnly(sess), FormatToman(sess.Total()), FormatToman(b.cfg.DepositAmount), sess.Address, sess.Phone)
-		b.api.SendMessage(b.cfg.AdminChatID, summary, adminMenuKeyboard())
+		if customer, err := b.data.GetCustomer(chatID); err != nil {
+			log.Printf("GetCustomer(%d): %v", chatID, err)
+		} else if customer != nil {
+			order.CustomerName = customer.FullName()
+		}
+		b.api.SendMessage(b.cfg.AdminChatID, adminOrderText(order), adminOrderKeyboard(order))
 		// Only the manual card-receipt flow has anything worth forwarding
 		// (the photo itself); a successful_payment update carries no
 		// forwardable message of its own.
@@ -556,6 +669,79 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 	}
 
 	sess.resetOrder()
+}
+
+// adminOrderText renders one order as a message for the admin, in the bot
+// chat itself (used both for the new-order notification and the
+// "recent orders" listing) so the admin can act on it without needing the
+// web panel.
+func adminOrderText(o db.Order) string {
+	name := o.CustomerName
+	if name == "" {
+		name = "—"
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📦 سفارش #%d — %s\n👤 %s\n\n", o.ID, o.StatusLabel(), name))
+	for _, item := range o.Items {
+		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
+	}
+	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان\nپرداخت‌شده: %s تومان", FormatToman(o.Total), FormatToman(o.Deposit)))
+	if o.Remaining() > 0 {
+		sb.WriteString(fmt.Sprintf("\nباقی‌مانده (دریافت هنگام تحویل): %s تومان", FormatToman(o.Remaining())))
+	}
+	sb.WriteString(fmt.Sprintf("\n📍 %s\n📞 %s", o.Address, o.Phone))
+	if o.HasLocation() {
+		sb.WriteString(fmt.Sprintf("\n📍 لوکیشن پیک: https://www.google.com/maps?q=%f,%f", *o.CustomerLat, *o.CustomerLng))
+	}
+	return sb.String()
+}
+
+// adminOrderKeyboard returns the one action button relevant to an order's
+// current status (nil once it's shipped — nothing left to do from chat).
+func adminOrderKeyboard(o db.Order) *bale.InlineKeyboardMarkup {
+	switch o.Status {
+	case db.StatusPending:
+		return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+			{{Text: "✅ تایید سفارش", CallbackData: fmt.Sprintf("admin:confirm:%d", o.ID)}},
+		}}
+	case db.StatusConfirmed:
+		return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+			{{Text: "🚚 ارسال شد (درخواست لوکیشن از مشتری)", CallbackData: fmt.Sprintf("admin:ship:%d", o.ID)}},
+		}}
+	default:
+		return nil
+	}
+}
+
+// ConfirmOrder marks an order confirmed and notifies the customer. Called
+// both from the admin web panel and from the admin's own bot-chat button.
+func (b *Bot) ConfirmOrder(orderID int64) (*db.Order, error) {
+	order, err := b.data.GetOrder(orderID)
+	if err != nil || order == nil {
+		return order, err
+	}
+	if err := b.data.UpdateOrderStatus(orderID, db.StatusConfirmed); err != nil {
+		return order, err
+	}
+	order.Status = db.StatusConfirmed
+	b.NotifyOrderConfirmed(order.ChatID, orderID)
+	return order, nil
+}
+
+// ShipOrder marks an order shipped and asks the customer for their live
+// location. Called both from the admin web panel and from the admin's own
+// bot-chat button.
+func (b *Bot) ShipOrder(orderID int64) (*db.Order, error) {
+	order, err := b.data.GetOrder(orderID)
+	if err != nil || order == nil {
+		return order, err
+	}
+	if err := b.data.UpdateOrderStatus(orderID, db.StatusShipped); err != nil {
+		return order, err
+	}
+	order.Status = db.StatusShipped
+	b.RequestShipmentLocation(order.ChatID, orderID)
+	return order, nil
 }
 
 // ---- admin-panel-triggered notifications ----
@@ -632,13 +818,19 @@ func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 
 func (b *Bot) handleAdminMessage(chatID int64, text string) {
 	switch text {
-	case adminOrdersButton:
+	case adminOrdersButton, "/orders":
 		b.sendRecentOrdersToAdmin(chatID)
+	case "/stats":
+		b.sendStatsToAdmin(chatID)
 	default:
-		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nقیمت‌ها و حداقل وزن هر میوه از پنل وب ادمین قابل تغییرند. برای مشاهده سفارش‌های اخیر از دکمه پایین صفحه استفاده کنید.", adminMenuKeyboard())
+		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nبرای دیدن و تایید/ارسال سفارش‌های اخیر از دکمه پایین صفحه استفاده کنید. قیمت‌ها، حداقل وزن و کیف‌پول مشتری‌ها از پنل وب ادمین قابل تغییرند.", adminMenuKeyboard())
 	}
 }
 
+// sendRecentOrdersToAdmin sends each recent order as its own message with
+// an inline "✅ تایید سفارش" / "🚚 ارسال شد" button matching its current
+// status, so the admin can act on orders directly from the Bale chat
+// without needing the web panel.
 func (b *Bot) sendRecentOrdersToAdmin(chatID int64) {
 	orders, err := b.data.ListRecentOrders(10)
 	if err != nil {
@@ -650,23 +842,21 @@ func (b *Bot) sendRecentOrdersToAdmin(chatID int64) {
 		b.api.SendMessage(chatID, "هنوز سفارشی ثبت نشده است.", adminMenuKeyboard())
 		return
 	}
-
-	var sb strings.Builder
-	sb.WriteString("📦 آخرین سفارش‌ها:\n\n")
 	for _, o := range orders {
-		sb.WriteString(fmt.Sprintf("#%d — %s\n", o.ID, o.CreatedAt.Format("2006-01-02 15:04")))
-		for _, item := range o.Items {
-			sb.WriteString(fmt.Sprintf("  %s %s (%s کیلو)\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
-		}
-		sb.WriteString(fmt.Sprintf("  جمع: %s تومان — ودیعه: %s تومان\n  📍 %s | 📞 %s\n\n", FormatToman(o.Total), FormatToman(o.Deposit), o.Address, o.Phone))
+		b.api.SendMessage(chatID, adminOrderText(o), adminOrderKeyboard(o))
 	}
-	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
 }
 
-func cartLinesOnly(sess *Session) string {
-	var sb strings.Builder
-	for _, item := range sess.Cart {
-		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
+func (b *Bot) sendStatsToAdmin(chatID int64) {
+	st, err := b.data.Stats()
+	if err != nil {
+		log.Printf("Stats: %v", err)
+		b.api.SendMessage(chatID, "خطا در خواندن آمار.", adminMenuKeyboard())
+		return
 	}
-	return strings.TrimRight(sb.String(), "\n")
+	text := fmt.Sprintf(
+		"📊 آمار سفارش‌ها\n\nکل سفارش‌ها: %d\nجمع کل فروش: %s تومان\nجمع مبالغ دریافتی: %s تومان\n\n⏳ در انتظار تایید: %d\n✅ تایید شده: %d\n🚚 ارسال شده: %d",
+		st.TotalOrders, FormatToman(st.TotalRevenue), FormatToman(st.TotalDeposits), st.PendingCount, st.ConfirmedCount, st.ShippedCount,
+	)
+	b.api.SendMessage(chatID, text, adminMenuKeyboard())
 }

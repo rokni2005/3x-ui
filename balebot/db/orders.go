@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -27,19 +28,30 @@ type OrderItem struct {
 	PricePerKg int     `json:"price_per_kg"`
 }
 
-// Order is a finalized customer order (deposit receipt received).
+// Order is a finalized customer order (deposit or full payment received).
 type Order struct {
-	ID          int64
-	ChatID      int64
-	Address     string
-	Phone       string
-	Items       []OrderItem
-	Total       int
-	Deposit     int
-	Status      string
-	CustomerLat *float64
-	CustomerLng *float64
-	CreatedAt   time.Time
+	ID           int64
+	ChatID       int64
+	Address      string
+	Phone        string
+	Items        []OrderItem
+	Total        int
+	Deposit      int // amount actually paid up front: the deposit, or the full total if the customer chose to pay it all
+	Status       string
+	CustomerLat  *float64
+	CustomerLng  *float64
+	CustomerName string // from the customers table; "" if the customer never set a name
+	CreatedAt    time.Time
+}
+
+// Remaining is how much of Total is still owed after the up-front payment
+// (0 once the customer paid in full).
+func (o Order) Remaining() int {
+	r := o.Total - o.Deposit
+	if r < 0 {
+		return 0
+	}
+	return r
 }
 
 // HasLocation reports whether the customer has shared their location for
@@ -77,23 +89,26 @@ func (s *Store) SaveOrder(o Order) (int64, error) {
 	return res.LastInsertId()
 }
 
-const orderColumns = `id, chat_id, address, phone, items_json, total, deposit, status, customer_lat, customer_lng, created_at`
+const orderColumns = `o.id, o.chat_id, o.address, o.phone, o.items_json, o.total, o.deposit, o.status, o.customer_lat, o.customer_lng, o.created_at, COALESCE(c.first_name, ''), COALESCE(c.last_name, '')`
+
+const orderFromJoin = `orders o LEFT JOIN customers c ON c.chat_id = o.chat_id`
 
 func scanOrder(row interface{ Scan(...any) error }) (Order, error) {
 	var o Order
-	var itemsJSON string
-	if err := row.Scan(&o.ID, &o.ChatID, &o.Address, &o.Phone, &itemsJSON, &o.Total, &o.Deposit, &o.Status, &o.CustomerLat, &o.CustomerLng, &o.CreatedAt); err != nil {
+	var itemsJSON, firstName, lastName string
+	if err := row.Scan(&o.ID, &o.ChatID, &o.Address, &o.Phone, &itemsJSON, &o.Total, &o.Deposit, &o.Status, &o.CustomerLat, &o.CustomerLng, &o.CreatedAt, &firstName, &lastName); err != nil {
 		return o, err
 	}
 	if err := json.Unmarshal([]byte(itemsJSON), &o.Items); err != nil {
 		return o, err
 	}
+	o.CustomerName = strings.TrimSpace(firstName + " " + lastName)
 	return o, nil
 }
 
 // GetOrder looks up a single order by ID, returning (Order{}, nil) if not found.
 func (s *Store) GetOrder(id int64) (*Order, error) {
-	row := s.conn.QueryRow(fmt.Sprintf(`SELECT %s FROM orders WHERE id = ?`, orderColumns), id)
+	row := s.conn.QueryRow(fmt.Sprintf(`SELECT %s FROM %s WHERE o.id = ?`, orderColumns, orderFromJoin), id)
 	o, err := scanOrder(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -106,7 +121,7 @@ func (s *Store) GetOrder(id int64) (*Order, error) {
 
 // ListRecentOrders returns the most recent orders, newest first, for the admin panel.
 func (s *Store) ListRecentOrders(limit int) ([]Order, error) {
-	rows, err := s.conn.Query(fmt.Sprintf(`SELECT %s FROM orders ORDER BY id DESC LIMIT ?`, orderColumns), limit)
+	rows, err := s.conn.Query(fmt.Sprintf(`SELECT %s FROM %s ORDER BY o.id DESC LIMIT ?`, orderColumns, orderFromJoin), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -127,11 +142,11 @@ func (s *Store) ListRecentOrders(limit int) ([]Order, error) {
 // A zero `since` returns every order (still capped at limit).
 func (s *Store) ListOrdersSince(since time.Time, limit int) ([]Order, error) {
 	rows, err := s.conn.Query(fmt.Sprintf(`
-		SELECT %s FROM orders
-		WHERE created_at >= ?
-		ORDER BY id DESC
+		SELECT %s FROM %s
+		WHERE o.created_at >= ?
+		ORDER BY o.id DESC
 		LIMIT ?
-	`, orderColumns), since.UTC().Format("2006-01-02 15:04:05"), limit)
+	`, orderColumns, orderFromJoin), since.UTC().Format("2006-01-02 15:04:05"), limit)
 	if err != nil {
 		return nil, err
 	}
