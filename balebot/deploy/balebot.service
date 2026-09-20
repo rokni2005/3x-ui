@@ -1,0 +1,22 @@
+[Unit]
+Description=Bale fruit-order bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/balebot/balebot.env
+ExecStart=/opt/balebot/bin/balebot
+WorkingDirectory=/opt/balebot
+Restart=on-failure
+RestartSec=5
+User=balebot
+Group=balebot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/balebot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
