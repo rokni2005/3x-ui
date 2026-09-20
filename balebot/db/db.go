@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS customers (
 	wallet_debt INTEGER NOT NULL DEFAULT 0,
 	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS addresses (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	chat_id     INTEGER NOT NULL,
+	address     TEXT NOT NULL,
+	phone       TEXT NOT NULL,
+	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // Store wraps the SQLite connection used by the bot and the admin panel.

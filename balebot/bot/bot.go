@@ -197,16 +197,25 @@ func (b *Bot) handleMessage(msg bale.Message) {
 			return
 		}
 		sess.Address = text
+		if lastPhone := b.lastKnownPhone(chatID); lastPhone != "" {
+			sess.Stage = StageAwaitingPhone
+			b.api.SendMessage(chatID, fmt.Sprintf("ممنون 🙏\nشماره تماس قبلی شما: %s\nهمین شماره تحویل‌گیرنده‌ی این سفارشه؟", lastPhone), phoneChoiceKeyboard())
+			return
+		}
 		sess.Stage = StageAwaitingPhone
 		b.api.SendMessage(chatID, "ممنون 🙏\nلطفا شماره تماس خود را وارد کنید:", nil)
 
 	case StageAwaitingPhone:
-		if !isValidPhone(text) {
+		phone := normalizeDigits(text)
+		if !isValidPhone(phone) {
 			b.api.SendMessage(chatID, "شماره تماس معتبر نیست. لطفا یک شماره موبایل صحیح وارد کنید (مثال: 09121234567):", nil)
 			return
 		}
-		sess.Phone = text
+		sess.Phone = phone
 		sess.Stage = StageInvoice
+		if err := b.data.SaveAddress(chatID, sess.Address, sess.Phone); err != nil {
+			log.Printf("SaveAddress(%d): %v", chatID, err)
+		}
 		b.sendInvoice(chatID, sess)
 
 	case StageAwaitingReceipt:
@@ -223,13 +232,28 @@ func (b *Bot) handleMessage(msg bale.Message) {
 
 var phonePattern = regexp.MustCompile(`^(\+?98|0)?9\d{9}$`)
 
+// normalizeDigits converts Persian (۰-۹) and Arabic-Indic (٠-٩) digits, as
+// typed by many mobile keyboards set to Persian, into plain ASCII digits.
+func normalizeDigits(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= '۰' && r <= '۹':
+			return '0' + (r - '۰')
+		case r >= '٠' && r <= '٩':
+			return '0' + (r - '٠')
+		default:
+			return r
+		}
+	}, s)
+}
+
 func isValidPhone(text string) bool {
 	digits := strings.Map(func(r rune) rune {
 		if r >= '0' && r <= '9' || r == '+' {
 			return r
 		}
 		return -1
-	}, text)
+	}, normalizeDigits(text))
 	return phonePattern.MatchString(digits)
 }
 
@@ -346,9 +370,53 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			b.api.AnswerCallbackQuery(cq.ID, "سبد خرید شما خالی است", true)
 			return
 		}
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		addresses, err := b.data.ListAddresses(chatID)
+		if err != nil {
+			log.Printf("ListAddresses(%d): %v", chatID, err)
+		}
+		if len(addresses) > 0 {
+			b.api.SendMessage(chatID, "یکی از آدرس‌های قبلی‌تون رو انتخاب کنید یا آدرس جدید وارد کنید:", addressChoiceKeyboard(addresses))
+			return
+		}
+		sess.Stage = StageAwaitingAddress
+		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
+
+	case strings.HasPrefix(data, "addr:use:"):
+		addr, err := b.data.GetAddress(parseInt64(strings.TrimPrefix(data, "addr:use:")))
+		if err != nil || addr == nil || addr.ChatID != chatID {
+			b.api.AnswerCallbackQuery(cq.ID, "آدرس یافت نشد", true)
+			return
+		}
+		sess.Address = addr.Address
+		sess.Phone = addr.Phone
+		sess.Stage = StageInvoice
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.sendInvoice(chatID, sess)
+
+	case data == "addr:new":
 		sess.Stage = StageAwaitingAddress
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
+
+	case data == "phone:reuse":
+		phone := b.lastKnownPhone(chatID)
+		if phone == "" {
+			b.api.AnswerCallbackQuery(cq.ID, "", false)
+			return
+		}
+		sess.Phone = phone
+		sess.Stage = StageInvoice
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		if err := b.data.SaveAddress(chatID, sess.Address, sess.Phone); err != nil {
+			log.Printf("SaveAddress(%d): %v", chatID, err)
+		}
+		b.sendInvoice(chatID, sess)
+
+	case data == "phone:new":
+		sess.Stage = StageAwaitingPhone
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.api.SendMessage(chatID, "لطفا شماره تماس تحویل‌گیرنده را وارد کنید:", nil)
 
 	case data == "pay:deposit" || data == "pay:full":
 		full := data == "pay:full"
@@ -379,7 +447,7 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 
 	case chatID == b.cfg.AdminChatID && strings.HasPrefix(data, "admin:confirm:"):
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
-		order, err := b.ConfirmOrder(parseOrderID(strings.TrimPrefix(data, "admin:confirm:")))
+		order, err := b.ConfirmOrder(parseInt64(strings.TrimPrefix(data, "admin:confirm:")))
 		if err != nil || order == nil {
 			log.Printf("ConfirmOrder: %v", err)
 			return
@@ -390,7 +458,7 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 
 	case chatID == b.cfg.AdminChatID && strings.HasPrefix(data, "admin:ship:"):
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
-		order, err := b.ShipOrder(parseOrderID(strings.TrimPrefix(data, "admin:ship:")))
+		order, err := b.ShipOrder(parseInt64(strings.TrimPrefix(data, "admin:ship:")))
 		if err != nil || order == nil {
 			log.Printf("ShipOrder: %v", err)
 			return
@@ -404,9 +472,44 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 	}
 }
 
-func parseOrderID(s string) int64 {
+func parseInt64(s string) int64 {
 	id, _ := strconv.ParseInt(s, 10, 64)
 	return id
+}
+
+// lastKnownPhone returns the phone number from a customer's most recently
+// saved address, or "" if they have none yet.
+func (b *Bot) lastKnownPhone(chatID int64) string {
+	addresses, err := b.data.ListAddresses(chatID)
+	if err != nil || len(addresses) == 0 {
+		return ""
+	}
+	return addresses[0].Phone
+}
+
+// addressChoiceKeyboard lets a returning customer pick a previously used
+// address (which carries its phone number along with it) instead of typing
+// it again, or start a fresh one.
+func addressChoiceKeyboard(addresses []db.Address) *bale.InlineKeyboardMarkup {
+	var rows [][]bale.InlineKeyboardButton
+	for _, a := range addresses {
+		label := []rune(a.Address)
+		if len(label) > 40 {
+			label = label[:40]
+		}
+		rows = append(rows, []bale.InlineKeyboardButton{
+			{Text: fmt.Sprintf("📍 %s… (%s)", string(label), a.Phone), CallbackData: fmt.Sprintf("addr:use:%d", a.ID)},
+		})
+	}
+	rows = append(rows, []bale.InlineKeyboardButton{{Text: "➕ آدرس جدید", CallbackData: "addr:new"}})
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func phoneChoiceKeyboard() *bale.InlineKeyboardMarkup {
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{{Text: "✅ بله، همین شماره", CallbackData: "phone:reuse"}},
+		{{Text: "✏️ گیرنده شخص دیگریه (شماره جدید)", CallbackData: "phone:new"}},
+	}}
 }
 
 // ---- view builders ----
