@@ -28,8 +28,11 @@ const (
 	// Persistent reply-keyboard button labels. Tapping one of these sends
 	// its exact text back to the bot as an ordinary message, so neither
 	// customers nor the admin ever need to type a command like /start.
-	customerMenuButton = "🍉 منو و سفارش میوه"
-	adminOrdersButton  = "📦 سفارش‌های اخیر"
+	customerMenuButton  = "🍉 منو و سفارش میوه"
+	adminOrdersButton   = "📦 سفارش‌های اخیر"
+	adminStatsButton    = "📊 آمار"
+	adminWalletsButton  = "👛 کیف‌پول‌های بدهکار"
+	adminFruitsButton   = "🍉 قیمت میوه‌ها"
 )
 
 // Config holds the deposit/payment details shown to customers.
@@ -805,7 +808,10 @@ func customerMenuKeyboard() *bale.ReplyKeyboardMarkup {
 
 func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 	return &bale.ReplyKeyboardMarkup{
-		Keyboard:       [][]bale.KeyboardButton{{{Text: adminOrdersButton}}},
+		Keyboard: [][]bale.KeyboardButton{
+			{{Text: adminOrdersButton}, {Text: adminStatsButton}},
+			{{Text: adminWalletsButton}, {Text: adminFruitsButton}},
+		},
 		ResizeKeyboard: true,
 	}
 }
@@ -820,11 +826,53 @@ func (b *Bot) handleAdminMessage(chatID int64, text string) {
 	switch text {
 	case adminOrdersButton, "/orders":
 		b.sendRecentOrdersToAdmin(chatID)
-	case "/stats":
+	case adminStatsButton, "/stats":
 		b.sendStatsToAdmin(chatID)
+	case adminWalletsButton, "/wallets":
+		b.sendWalletsToAdmin(chatID)
+	case adminFruitsButton, "/fruits":
+		b.sendFruitsToAdmin(chatID)
+	case "/start":
+		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nاز دکمه‌های پایین صفحه استفاده کنید.", adminMenuKeyboard())
 	default:
-		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nبرای دیدن و تایید/ارسال سفارش‌های اخیر از دکمه پایین صفحه استفاده کنید. قیمت‌ها، حداقل وزن و کیف‌پول مشتری‌ها از پنل وب ادمین قابل تغییرند.", adminMenuKeyboard())
+		b.api.SendMessage(chatID, "متوجه نشدم 🙏 از دکمه‌های پایین صفحه استفاده کنید.", adminMenuKeyboard())
 	}
+}
+
+func (b *Bot) sendWalletsToAdmin(chatID int64) {
+	customers, err := b.data.ListCustomersWithDebt()
+	if err != nil {
+		log.Printf("ListCustomersWithDebt: %v", err)
+		b.api.SendMessage(chatID, "خطا در خواندن کیف‌پول‌ها.", adminMenuKeyboard())
+		return
+	}
+	if len(customers) == 0 {
+		b.api.SendMessage(chatID, "هیچ مشتری‌ای در حال حاضر بدهی باقی‌مانده ندارد.", adminMenuKeyboard())
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("👛 کیف‌پول‌های بدهکار:\n\n")
+	for _, c := range customers {
+		sb.WriteString(fmt.Sprintf("👤 %s (chat id: %d)\n   بدهی: %s تومان\n\n", c.FullName(), c.ChatID, FormatToman(c.WalletDebt)))
+	}
+	sb.WriteString("برای صفر کردن یا ویرایش، از پنل وب ادمین (بخش کیف‌پول) استفاده کنید.")
+	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
+}
+
+func (b *Bot) sendFruitsToAdmin(chatID int64) {
+	fruits, err := b.data.ListFruits()
+	if err != nil {
+		log.Printf("ListFruits: %v", err)
+		b.api.SendMessage(chatID, "خطا در خواندن لیست میوه‌ها.", adminMenuKeyboard())
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("🍉 قیمت میوه‌ها:\n\n")
+	for _, f := range fruits {
+		sb.WriteString(fmt.Sprintf("%s %s — %s تومان/کیلو (حداقل %s کیلو)\n", f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg)))
+	}
+	sb.WriteString("\nبرای ویرایش قیمت، عکس یا افزودن/حذف میوه، از پنل وب ادمین استفاده کنید.")
+	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
 }
 
 // sendRecentOrdersToAdmin sends each recent order as its own message with
