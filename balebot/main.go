@@ -24,16 +24,20 @@ func main() {
 	}
 
 	dbPath := getEnv("DB_PATH", "balebot.db")
-	store, err := db.Open(dbPath)
+	photosDir := getEnv("PHOTOS_DIR", "photos")
+	store, err := db.Open(dbPath, photosDir)
 	if err != nil {
 		log.Fatalf("opening database %s: %v", dbPath, err)
 	}
 	defer store.Close()
 
 	cfg := bot.Config{
-		DepositAmount: 200000,
-		CardNumber:    getEnv("DEPOSIT_CARD_NUMBER", "xxxx-xxxx-xxxx-xxxx"),
-		CardHolder:    getEnv("DEPOSIT_CARD_HOLDER", "نام صاحب حساب"),
+		DepositAmount:           200000,
+		CardNumber:              getEnv("DEPOSIT_CARD_NUMBER", "xxxx-xxxx-xxxx-xxxx"),
+		CardHolder:              getEnv("DEPOSIT_CARD_HOLDER", "نام صاحب حساب"),
+		PaymentProviderToken:    os.Getenv("PAYMENT_PROVIDER_TOKEN"),
+		PaymentCurrency:         getEnv("PAYMENT_CURRENCY", "IRR"),
+		PaymentAmountMultiplier: 10,
 	}
 	if v := os.Getenv("DEPOSIT_AMOUNT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -49,10 +53,24 @@ func main() {
 			log.Printf("ignoring invalid ADMIN_CHAT_ID %q: %v", v, err)
 		}
 	}
+	if v := os.Getenv("PAYMENT_AMOUNT_MULTIPLIER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.PaymentAmountMultiplier = n
+		} else {
+			log.Printf("ignoring invalid PAYMENT_AMOUNT_MULTIPLIER %q: %v", v, err)
+		}
+	}
 
 	startAdminPanel(store)
 
 	client := bale.NewClient(token)
+	client.Debug = os.Getenv("DEBUG_UPDATES") == "1"
+	if client.Debug {
+		log.Println("DEBUG_UPDATES=1: raw Bale API responses will be logged (use only to verify the payment payload shape, then turn off)")
+	}
+	if cfg.PaymentProviderToken != "" {
+		log.Printf("wallet payments enabled (currency=%s, amount multiplier=%d) — verify with one small real transaction before trusting it for customers", cfg.PaymentCurrency, cfg.PaymentAmountMultiplier)
+	}
 	b := bot.New(client, store, cfg)
 
 	log.Println("fruit order bot is running...")
@@ -69,7 +87,9 @@ func startAdminPanel(store *db.Store) {
 		return
 	}
 
-	addr := getEnv("ADMIN_LISTEN_ADDR", ":8080")
+	// Bound to localhost by default: reach it via `ssh -L 8080:127.0.0.1:8080`,
+	// not by exposing it on the public interface.
+	addr := getEnv("ADMIN_LISTEN_ADDR", "127.0.0.1:8080")
 	server := admin.New(store, username, password)
 	go func() {
 		log.Printf("admin panel listening on %s", addr)

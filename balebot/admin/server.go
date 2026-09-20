@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.auth(s.handleRoot))
 	mux.HandleFunc("/fruits", s.auth(s.handleFruits))
 	mux.HandleFunc("/fruits/update", s.auth(s.handleUpdateFruit))
+	mux.HandleFunc("/photo", s.auth(s.handlePhoto))
 	mux.HandleFunc("/orders", s.auth(s.handleOrders))
 	return mux
 }
@@ -76,7 +78,7 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 	.msg.err { background:#fdecea; color:#b3261e; }
 	.header-row, .fruit-row {
 		display:grid;
-		grid-template-columns: 2fr 1fr 1fr 90px;
+		grid-template-columns: 56px 1.6fr 1fr 1fr 1.4fr 90px;
 		gap:12px;
 		align-items:center;
 		padding:10px 12px;
@@ -87,26 +89,39 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 	.fruit-row input {
 		width:100%; box-sizing:border-box; padding:6px 8px; border:1px solid #ccc; border-radius:6px;
 	}
+	.fruit-row input[type=file] { padding:2px 0; border:none; font-size:12px; }
 	.fruit-row button {
 		padding:7px 10px; border:none; border-radius:6px; background:#2e7d32; color:#fff; cursor:pointer;
+	}
+	.thumb {
+		width:48px; height:48px; border-radius:8px; object-fit:cover; background:#f0f0f0; display:block;
+	}
+	.thumb.empty {
+		display:flex; align-items:center; justify-content:center; font-size:20px; color:#bbb;
 	}
 	.list { border:1px solid #e0e0e0; border-radius:10px; overflow:hidden; }
 </style>
 </head>
 <body>
 	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a></nav>
-	<h1>🍉 مدیریت قیمت و حداقل وزن سفارش میوه‌ها</h1>
+	<h1>🍉 مدیریت قیمت، حداقل وزن و عکس میوه‌ها</h1>
 	{{if .Message}}<div class="msg {{.MessageClass}}">{{.Message}}</div>{{end}}
 	<div class="list">
 		<div class="header-row">
-			<div>میوه</div><div>قیمت (تومان/کیلو)</div><div>حداقل سفارش (کیلوگرم)</div><div></div>
+			<div></div><div>میوه</div><div>قیمت (تومان/کیلو)</div><div>حداقل سفارش (کیلوگرم)</div><div>عکس</div><div></div>
 		</div>
 		{{range .Fruits}}
-		<form class="fruit-row" method="post" action="/fruits/update">
+		<form class="fruit-row" method="post" action="/fruits/update" enctype="multipart/form-data">
+			{{if .PhotoPath}}
+				<img class="thumb" src="/photo?id={{.ID}}" alt="{{.Name}}">
+			{{else}}
+				<div class="thumb empty">{{.Emoji}}</div>
+			{{end}}
 			<div>{{.Emoji}} {{.Name}}</div>
 			<input type="hidden" name="id" value="{{.ID}}">
 			<div><input type="number" name="price" value="{{.Price}}" min="0" step="1000" required></div>
 			<div><input type="number" name="min_weight" value="{{weight .MinWeightKg}}" min="0.1" step="0.1" required></div>
+			<div><input type="file" name="photo" accept="image/jpeg,image/png,image/webp"></div>
 			<div><button type="submit">ذخیره</button></div>
 		</form>
 		{{end}}
@@ -137,6 +152,9 @@ func (s *Server) handleFruits(w http.ResponseWriter, r *http.Request) {
 	case "err":
 		data.Message = "❌ مقدار وارد شده نامعتبر است."
 		data.MessageClass = "err"
+	case "photo_err":
+		data.Message = "❌ قیمت و حداقل وزن ذخیره شد، اما آپلود عکس با خطا مواجه شد (فرمت باید jpg، png یا webp باشد)."
+		data.MessageClass = "err"
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -145,12 +163,14 @@ func (s *Server) handleFruits(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const maxPhotoUploadBytes = 10 << 20 // 10 MiB
+
 func (s *Server) handleUpdateFruit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := r.ParseMultipartForm(maxPhotoUploadBytes); err != nil {
 		http.Redirect(w, r, "/fruits?status=err", http.StatusFound)
 		return
 	}
@@ -170,7 +190,52 @@ func (s *Server) handleUpdateFruit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.maybeSavePhoto(r, id); err != nil {
+		log.Printf("admin: save photo for %s: %v", id, err)
+		http.Redirect(w, r, "/fruits?status=photo_err", http.StatusFound)
+		return
+	}
+
 	http.Redirect(w, r, "/fruits?status=ok", http.StatusFound)
+}
+
+// maybeSavePhoto stores an uploaded "photo" file, if one was submitted.
+// A missing file is not an error: the photo field is optional on every save.
+func (s *Server) maybeSavePhoto(r *http.Request, fruitID string) error {
+	file, header, err := r.FormFile("photo")
+	if err == http.ErrMissingFile {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext == ".jpeg" {
+		ext = ".jpg"
+	}
+
+	filename, err := s.data.SavePhoto(fruitID, ext, file)
+	if err != nil {
+		return err
+	}
+	return s.data.UpdateFruitPhoto(fruitID, filename)
+}
+
+func (s *Server) handlePhoto(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	fruit, err := s.data.GetFruit(id)
+	if err != nil {
+		log.Printf("admin: GetFruit(%s): %v", id, err)
+		http.Error(w, "خطا", http.StatusInternalServerError)
+		return
+	}
+	if fruit == nil || fruit.PhotoPath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, s.data.PhotoFullPath(fruit.PhotoPath))
 }
 
 var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`

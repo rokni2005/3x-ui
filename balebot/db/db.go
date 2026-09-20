@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS fruits (
 	name           TEXT NOT NULL,
 	price          INTEGER NOT NULL,
 	min_weight_kg  REAL NOT NULL DEFAULT 0.5,
-	sort_order     INTEGER NOT NULL DEFAULT 0
+	sort_order     INTEGER NOT NULL DEFAULT 0,
+	photo_path     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -34,12 +35,16 @@ CREATE TABLE IF NOT EXISTS orders (
 
 // Store wraps the SQLite connection used by the bot and the admin panel.
 type Store struct {
-	conn *sql.DB
+	conn      *sql.DB
+	photosDir string
 }
 
 // Open creates/opens the SQLite file at path, applies the schema and, on a
-// fresh database, seeds the default fruit catalog.
-func Open(path string) (*Store, error) {
+// fresh database, seeds the default fruit catalog. photosDir is where fruit
+// display photos uploaded from the admin panel are stored on disk; both the
+// admin panel and the bot read/write through this same Store, so they always
+// agree on where a fruit's photo lives.
+func Open(path, photosDir string) (*Store, error) {
 	conn, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("db: open %s: %w", path, err)
@@ -52,8 +57,12 @@ func Open(path string) (*Store, error) {
 		conn.Close()
 		return nil, fmt.Errorf("db: migrate: %w", err)
 	}
+	if err := addColumnIfMissing(conn, "fruits", "photo_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("db: migrate fruits.photo_path: %w", err)
+	}
 
-	store := &Store{conn: conn}
+	store := &Store{conn: conn, photosDir: photosDir}
 	if err := store.seedFruitsIfEmpty(); err != nil {
 		conn.Close()
 		return nil, err
@@ -64,4 +73,35 @@ func Open(path string) (*Store, error) {
 // Close releases the underlying database connection.
 func (s *Store) Close() error {
 	return s.conn.Close()
+}
+
+// addColumnIfMissing lets us evolve the schema (e.g. adding fruits.photo_path
+// to a database created before this field existed) without erroring on
+// every later startup once the column is already there.
+func addColumnIfMissing(conn *sql.DB, table, column, definition string) error {
+	rows, err := conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid, notNull, pk int
+			name, colType    string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = conn.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
+	return err
 }

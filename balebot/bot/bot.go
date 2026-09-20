@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +15,17 @@ import (
 const (
 	weightStepKg = 0.5
 	maxWeightKg  = 30
+
+	// depositInvoicePayload identifies our one and only invoice type; kept
+	// short and constant since the deposit amount is a fixed shop-wide
+	// setting, not per-order.
+	depositInvoicePayload = "deposit"
+
+	// Persistent reply-keyboard button labels. Tapping one of these sends
+	// its exact text back to the bot as an ordinary message, so neither
+	// customers nor the admin ever need to type a command like /start.
+	customerMenuButton = "🍉 منو و سفارش میوه"
+	adminOrdersButton  = "📦 سفارش‌های اخیر"
 )
 
 // Config holds the deposit/payment details shown to customers.
@@ -22,6 +34,18 @@ type Config struct {
 	DepositAmount int
 	CardNumber    string
 	CardHolder    string
+
+	// PaymentProviderToken is a Bale wallet/payment provider token (e.g.
+	// "WALLET-..."). When set, the deposit is collected via a native
+	// sendInvoice payment instead of manual card-to-card transfer.
+	PaymentProviderToken string
+	// PaymentCurrency is the currency code passed to sendInvoice.
+	PaymentCurrency string
+	// PaymentAmountMultiplier converts DepositAmount (Toman) into the
+	// currency's smallest unit expected by sendInvoice. Bale's payment API
+	// isn't fully documented here, so this defaults to 10 (Toman -> Rial)
+	// but is meant to be corrected via config after a real test payment.
+	PaymentAmountMultiplier int
 }
 
 // Bot wires together the Bale API client, the persistent catalog/orders
@@ -62,6 +86,10 @@ func (b *Bot) handleUpdate(u bale.Update) {
 		}
 	}()
 
+	if u.PreCheckoutQuery != nil {
+		b.handlePreCheckoutQuery(*u.PreCheckoutQuery)
+		return
+	}
 	if u.CallbackQuery != nil {
 		b.handleCallback(*u.CallbackQuery)
 		return
@@ -71,15 +99,44 @@ func (b *Bot) handleUpdate(u bale.Update) {
 	}
 }
 
+// handlePreCheckoutQuery approves or rejects a charge just before Bale
+// processes it. We reject anything that doesn't match our one known invoice
+// (payload and amount), since accepting a mismatched charge would collect
+// the wrong amount from the customer.
+func (b *Bot) handlePreCheckoutQuery(q bale.PreCheckoutQuery) {
+	expected := b.cfg.DepositAmount * b.cfg.PaymentAmountMultiplier
+	if q.InvoicePayload != depositInvoicePayload || q.TotalAmount != expected {
+		if err := b.api.AnswerPreCheckoutQuery(q.ID, false, "مبلغ پرداخت با سفارش مطابقت ندارد. لطفا دوباره تلاش کنید."); err != nil {
+			log.Printf("AnswerPreCheckoutQuery (reject): %v", err)
+		}
+		return
+	}
+	if err := b.api.AnswerPreCheckoutQuery(q.ID, true, ""); err != nil {
+		log.Printf("AnswerPreCheckoutQuery (accept): %v", err)
+	}
+}
+
 // ---- messages ----
 
 func (b *Bot) handleMessage(msg bale.Message) {
 	chatID := msg.Chat.ID
-	sess := b.sessions.Get(chatID)
 	text := strings.TrimSpace(msg.Text)
 
-	if text == "/start" {
+	if b.cfg.AdminChatID != 0 && chatID == b.cfg.AdminChatID {
+		b.handleAdminMessage(chatID, text)
+		return
+	}
+
+	sess := b.sessions.Get(chatID)
+
+	if msg.SuccessfulPayment != nil {
+		b.finalizeOrder(chatID, sess, &msg)
+		return
+	}
+
+	if text == "/start" || text == customerMenuButton {
 		sess.resetOrder()
+		b.api.SendMessage(chatID, "🍇 سلام! به سفارش آنلاین میوه خوش آمدید.\nهر وقت خواستید به این منو برگردید، کافیه دکمه پایین صفحه رو بزنید 👇", customerMenuKeyboard())
 		b.sendCatalog(chatID, sess)
 		return
 	}
@@ -105,7 +162,7 @@ func (b *Bot) handleMessage(msg bale.Message) {
 
 	case StageAwaitingReceipt:
 		if len(msg.Photo) > 0 {
-			b.finalizeOrder(chatID, sess, msg)
+			b.finalizeOrder(chatID, sess, &msg)
 			return
 		}
 		b.api.SendMessage(chatID, "لطفا تصویر رسید واریزی ودیعه را همینجا ارسال کنید 🧾", nil)
@@ -164,7 +221,13 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		sess.CurrentWeight = fruit.MinWeightKg
 		sess.Stage = StageViewingFruit
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
-		b.editFruitDetail(chatID, messageID, sess, fruit)
+		if fruit.PhotoPath != "" {
+			// A photo message can't be turned into a text message by
+			// editing, so this always opens as a fresh message.
+			b.sendFruitPhoto(chatID, sess, fruit)
+		} else {
+			b.editFruitDetail(chatID, messageID, sess, fruit)
+		}
 
 	case data == "w:inc" || data == "w:dec":
 		fruit, err := b.data.GetFruit(sess.CurrentFruit)
@@ -184,7 +247,11 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			}
 		}
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
-		b.editFruitDetail(chatID, messageID, sess, fruit)
+		if len(cq.Message.Photo) > 0 {
+			b.editFruitPhotoCaption(chatID, messageID, sess, fruit)
+		} else {
+			b.editFruitDetail(chatID, messageID, sess, fruit)
+		}
 
 	case strings.HasPrefix(data, "add:"):
 		id := strings.TrimPrefix(data, "add:")
@@ -223,8 +290,12 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
 
 	case data == "pay:deposit":
-		sess.Stage = StageAwaitingReceipt
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		if b.cfg.PaymentProviderToken != "" {
+			b.sendDepositInvoice(chatID)
+			return
+		}
+		sess.Stage = StageAwaitingReceipt
 		text := fmt.Sprintf(
 			"لطفا مبلغ %s تومان بابت ودیعه سفارش را به شماره کارت زیر واریز کنید:\n\n💳 %s\nبه نام: %s\n\nپس از واریز، لطفا تصویر رسید پرداخت را همینجا ارسال کنید تا سفارش شما نهایی شود.",
 			FormatToman(b.cfg.DepositAmount), b.cfg.CardNumber, b.cfg.CardHolder,
@@ -315,6 +386,35 @@ func (b *Bot) editFruitDetail(chatID, messageID int64, sess *Session, fruit *db.
 	}
 }
 
+// sendFruitPhoto opens a fruit's detail view as a photo message with the
+// usual weight-picker caption/keyboard. If the photo file is missing or the
+// upload fails, it falls back to the plain text detail view so a bad/missing
+// photo never blocks ordering.
+func (b *Bot) sendFruitPhoto(chatID int64, sess *Session, fruit *db.Fruit) {
+	f, err := os.Open(b.data.PhotoFullPath(fruit.PhotoPath))
+	if err != nil {
+		log.Printf("open photo for %s: %v", fruit.ID, err)
+		b.api.SendMessage(chatID, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit))
+		return
+	}
+	defer f.Close()
+
+	if _, err := b.api.SendPhoto(chatID, fruit.PhotoPath, f, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit)); err != nil {
+		log.Printf("SendPhoto for %s: %v", fruit.ID, err)
+		b.api.SendMessage(chatID, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit))
+	}
+}
+
+// editFruitPhotoCaption updates the weight/amount shown on an already-open
+// photo detail message, falling back to a fresh photo message if the edit
+// itself fails for some reason.
+func (b *Bot) editFruitPhotoCaption(chatID, messageID int64, sess *Session, fruit *db.Fruit) {
+	if err := b.api.EditMessageCaption(chatID, messageID, fruitDetailText(sess, fruit), fruitDetailKeyboard(sess, fruit)); err != nil {
+		log.Printf("EditMessageCaption for %s: %v", fruit.ID, err)
+		b.sendFruitPhoto(chatID, sess, fruit)
+	}
+}
+
 func cartText(sess *Session) string {
 	var sb strings.Builder
 	sb.WriteString("🛒 سبد خرید شما:\n\n")
@@ -362,7 +462,32 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	b.api.SendMessage(chatID, sb.String(), keyboard)
 }
 
-func (b *Bot) finalizeOrder(chatID int64, sess *Session, receipt bale.Message) {
+// sendDepositInvoice asks Bale to charge the customer's wallet for the
+// deposit via a native invoice, instead of the manual card-transfer flow.
+func (b *Bot) sendDepositInvoice(chatID int64) {
+	amount := b.cfg.DepositAmount * b.cfg.PaymentAmountMultiplier
+	_, err := b.api.SendInvoice(
+		chatID,
+		"پرداخت ودیعه سفارش میوه",
+		fmt.Sprintf("ودیعه سفارش شما (%s تومان). مابقی مبلغ پس از تحویل سفارش دریافت می‌شود.", FormatToman(b.cfg.DepositAmount)),
+		depositInvoicePayload,
+		b.cfg.PaymentProviderToken,
+		b.cfg.PaymentCurrency,
+		[]bale.LabeledPrice{{Label: "ودیعه سفارش", Amount: amount}},
+	)
+	if err != nil {
+		log.Printf("SendInvoice: %v", err)
+		b.api.SendMessage(chatID, "متاسفانه در حال حاضر امکان پرداخت آنلاین وجود ندارد. لطفا کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.", nil)
+	}
+}
+
+func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) {
+	if len(sess.Cart) == 0 {
+		// Nothing to finalize: most likely a duplicate successful_payment
+		// or receipt-photo delivery for an order already completed.
+		return
+	}
+
 	items := make([]db.OrderItem, 0, len(sess.Cart))
 	for _, item := range sess.Cart {
 		items = append(items, db.OrderItem{
@@ -385,16 +510,77 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, receipt bale.Message) {
 		log.Printf("SaveOrder: %v", err)
 	}
 
-	b.api.SendMessage(chatID, "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿", nil)
+	confirmation := "✅ رسید شما دریافت شد. سفارش شما ثبت شد و همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+	if trigger != nil && trigger.SuccessfulPayment != nil {
+		confirmation = "✅ پرداخت ودیعه با موفقیت انجام شد و سفارش شما ثبت شد. همکاران ما به زودی جهت هماهنگی نهایی با شما تماس خواهند گرفت.\n\nبا تشکر از خرید شما 🌿"
+	}
+	b.api.SendMessage(chatID, confirmation, nil)
 
 	if b.cfg.AdminChatID != 0 {
 		summary := fmt.Sprintf("📦 سفارش جدید\n\n%s\n\nجمع کل: %s تومان\nودیعه: %s تومان\n📍 آدرس: %s\n📞 تماس: %s",
 			cartLinesOnly(sess), FormatToman(sess.Total()), FormatToman(b.cfg.DepositAmount), sess.Address, sess.Phone)
-		b.api.SendMessage(b.cfg.AdminChatID, summary, nil)
-		b.api.ForwardMessage(b.cfg.AdminChatID, chatID, receipt.MessageID)
+		b.api.SendMessage(b.cfg.AdminChatID, summary, adminMenuKeyboard())
+		if trigger != nil {
+			b.api.ForwardMessage(b.cfg.AdminChatID, chatID, trigger.MessageID)
+		}
 	}
 
 	sess.resetOrder()
+}
+
+// ---- reply keyboards (persistent, chat-wide "buttons instead of commands") ----
+
+func customerMenuKeyboard() *bale.ReplyKeyboardMarkup {
+	return &bale.ReplyKeyboardMarkup{
+		Keyboard:       [][]bale.KeyboardButton{{{Text: customerMenuButton}}},
+		ResizeKeyboard: true,
+	}
+}
+
+func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
+	return &bale.ReplyKeyboardMarkup{
+		Keyboard:       [][]bale.KeyboardButton{{{Text: adminOrdersButton}}},
+		ResizeKeyboard: true,
+	}
+}
+
+// ---- admin chat ----
+//
+// Price and minimum-weight changes go through the web admin panel (already
+// forms/buttons, not typed commands). This is just a quick, tap-only way for
+// the admin to check recent orders from inside the bot chat itself.
+
+func (b *Bot) handleAdminMessage(chatID int64, text string) {
+	switch text {
+	case adminOrdersButton:
+		b.sendRecentOrdersToAdmin(chatID)
+	default:
+		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nقیمت‌ها و حداقل وزن هر میوه از پنل وب ادمین قابل تغییرند. برای مشاهده سفارش‌های اخیر از دکمه پایین صفحه استفاده کنید.", adminMenuKeyboard())
+	}
+}
+
+func (b *Bot) sendRecentOrdersToAdmin(chatID int64) {
+	orders, err := b.data.ListRecentOrders(10)
+	if err != nil {
+		log.Printf("ListRecentOrders: %v", err)
+		b.api.SendMessage(chatID, "خطا در خواندن سفارش‌ها.", adminMenuKeyboard())
+		return
+	}
+	if len(orders) == 0 {
+		b.api.SendMessage(chatID, "هنوز سفارشی ثبت نشده است.", adminMenuKeyboard())
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📦 آخرین سفارش‌ها:\n\n")
+	for _, o := range orders {
+		sb.WriteString(fmt.Sprintf("#%d — %s\n", o.ID, o.CreatedAt.Format("2006-01-02 15:04")))
+		for _, item := range o.Items {
+			sb.WriteString(fmt.Sprintf("  %s %s (%s کیلو)\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
+		}
+		sb.WriteString(fmt.Sprintf("  جمع: %s تومان — ودیعه: %s تومان\n  📍 %s | 📞 %s\n\n", FormatToman(o.Total), FormatToman(o.Deposit), o.Address, o.Phone))
+	}
+	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
 }
 
 func cartLinesOnly(sess *Session) string {

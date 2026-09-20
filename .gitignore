@@ -17,3 +17,4 @@ balebot/balebot
 balebot/*.db
 balebot/*.db-shm
 balebot/*.db-wal
+balebot/photos/
