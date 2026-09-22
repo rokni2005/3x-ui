@@ -10,6 +10,7 @@ const (
 	StageBrowsing
 	StageViewingFruit
 	StageCart
+	StageChoosingNeighborhood
 	StageAwaitingAddress
 	StageAwaitingPhone
 	StageInvoice
@@ -38,6 +39,7 @@ type Session struct {
 	Cart          []CartItem
 	CurrentFruit  string
 	CurrentWeight float64
+	Neighborhood  string
 	Address       string
 	Phone         string
 
@@ -105,6 +107,7 @@ func (s *Session) resetOrder() {
 	s.Cart = nil
 	s.CurrentFruit = ""
 	s.CurrentWeight = 0
+	s.Neighborhood = ""
 	s.Address = ""
 	s.Phone = ""
 	s.PayingFull = false

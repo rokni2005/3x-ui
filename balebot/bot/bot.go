@@ -33,7 +33,20 @@ const (
 	adminStatsButton    = "📊 آمار"
 	adminWalletsButton  = "👛 کیف‌پول‌های بدهکار"
 	adminFruitsButton   = "🍉 قیمت میوه‌ها"
+
+	// supportChatURL opens a direct chat with support on Bale. This is a
+	// best-effort profile link (mirrors Telegram's t.me/<username> scheme,
+	// which Bale's own links at ble.ir/<username> follow) — if it doesn't
+	// resolve correctly, the actual Bale username should be swapped in
+	// here instead of the phone-number-shaped id.
+	supportChatURL = "https://ble.ir/9104304566"
 )
+
+// supportButtonRow is appended to every keyboard shown during the ordering
+// flow, so a customer can always reach support with one tap.
+func supportButtonRow() []bale.InlineKeyboardButton {
+	return []bale.InlineKeyboardButton{{Text: "🆘 پشتیبانی", URL: supportChatURL}}
+}
 
 // Config holds the deposit/payment details shown to customers.
 type Config struct {
@@ -193,10 +206,14 @@ func (b *Bot) handleMessage(msg bale.Message) {
 
 	case StageAwaitingAddress:
 		if len([]rune(text)) < 10 {
-			b.api.SendMessage(chatID, "لطفا آدرس کامل و دقیق خود را وارد کنید (حداقل شامل شهر، خیابان و پلاک):", nil)
+			b.api.SendMessage(chatID, "لطفا آدرس کامل و دقیق خود را وارد کنید (حداقل شامل خیابان و پلاک):", nil)
 			return
 		}
-		sess.Address = text
+		if sess.Neighborhood != "" {
+			sess.Address = sess.Neighborhood + "، " + text
+		} else {
+			sess.Address = text
+		}
 		if lastPhone := b.lastKnownPhone(chatID); lastPhone != "" {
 			sess.Stage = StageAwaitingPhone
 			b.api.SendMessage(chatID, fmt.Sprintf("ممنون 🙏\nشماره تماس قبلی شما: %s\nهمین شماره تحویل‌گیرنده‌ی این سفارشه؟", lastPhone), phoneChoiceKeyboard())
@@ -379,8 +396,8 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			b.api.SendMessage(chatID, "یکی از آدرس‌های قبلی‌تون رو انتخاب کنید یا آدرس جدید وارد کنید:", addressChoiceKeyboard(addresses))
 			return
 		}
-		sess.Stage = StageAwaitingAddress
-		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
+		sess.Stage = StageChoosingNeighborhood
+		b.api.SendMessage(chatID, neighborhoodPrompt, neighborhoodKeyboard())
 
 	case strings.HasPrefix(data, "addr:use:"):
 		addr, err := b.data.GetAddress(parseInt64(strings.TrimPrefix(data, "addr:use:")))
@@ -395,9 +412,20 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		b.sendInvoice(chatID, sess)
 
 	case data == "addr:new":
-		sess.Stage = StageAwaitingAddress
+		sess.Stage = StageChoosingNeighborhood
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
-		b.api.SendMessage(chatID, "لطفا آدرس کامل خود را برای ارسال سفارش وارد کنید:", nil)
+		b.api.SendMessage(chatID, neighborhoodPrompt, neighborhoodKeyboard())
+
+	case strings.HasPrefix(data, "hood:"):
+		name, ok := neighborhoodByID[strings.TrimPrefix(data, "hood:")]
+		if !ok {
+			b.api.AnswerCallbackQuery(cq.ID, "", false)
+			return
+		}
+		sess.Neighborhood = name
+		sess.Stage = StageAwaitingAddress
+		b.api.AnswerCallbackQuery(cq.ID, fmt.Sprintf("محله %s انتخاب شد", name), false)
+		b.api.SendMessage(chatID, fmt.Sprintf("محله «%s» ثبت شد ✅\nحالا لطفا آدرس کامل خود را وارد کنید (خیابان، کوچه، پلاک):", name), nil)
 
 	case data == "phone:reuse":
 		phone := b.lastKnownPhone(chatID)
@@ -572,6 +600,7 @@ func catalogKeyboard(sess *Session, fruits []db.Fruit) *bale.InlineKeyboardMarku
 			{Text: fmt.Sprintf("🛒 مشاهده سبد خرید (%d) و ثبت سفارش", len(sess.Cart)), CallbackData: "cart:view"},
 		})
 	}
+	rows = append(rows, supportButtonRow())
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
@@ -592,6 +621,7 @@ func fruitDetailKeyboard(sess *Session, fruit *db.Fruit) *bale.InlineKeyboardMar
 		},
 		{{Text: "✅ افزودن به سبد خرید", CallbackData: "add:" + fruit.ID}},
 		{{Text: "🔙 بازگشت به لیست میوه‌ها", CallbackData: "back:menu"}},
+		supportButtonRow(),
 	}}
 }
 
@@ -653,6 +683,7 @@ func cartKeyboard(sess *Session) *bale.InlineKeyboardMarkup {
 	rows = append(rows,
 		[]bale.InlineKeyboardButton{{Text: "➕ افزودن میوه دیگر", CallbackData: "back:menu"}},
 		[]bale.InlineKeyboardButton{{Text: "✅ ثبت آدرس و ادامه سفارش", CallbackData: "cart:checkout"}},
+		supportButtonRow(),
 	)
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -688,10 +719,51 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 			[]bale.InlineKeyboardButton{{Text: fmt.Sprintf("💰 پرداخت کامل با کیف‌پول (%s تومان)", FormatToman(total)), CallbackData: "pay:full"}},
 		)
 	}
-	rows = append(rows, []bale.InlineKeyboardButton{
-		{Text: fmt.Sprintf("🏦 واریز کارت‌به‌کارت (ودیعه %s تومان)", FormatToman(deposit)), CallbackData: "pay:manual"},
-	})
+	rows = append(rows,
+		[]bale.InlineKeyboardButton{{Text: fmt.Sprintf("🏦 واریز کارت‌به‌کارت (ودیعه %s تومان)", FormatToman(deposit)), CallbackData: "pay:manual"}},
+		supportButtonRow(),
+	)
 	b.api.SendMessage(chatID, sb.String(), &bale.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+// neighborhoods lists the north-Tehran areas we currently deliver to. The
+// customer picks one at checkout instead of typing it, and it's prefixed
+// onto whatever street/plate address they type next.
+var neighborhoods = []struct{ ID, Name string }{
+	{"niavaran", "نیاوران"},
+	{"velenjak", "ولنجک"},
+	{"farmaniyeh", "فرمانیه"},
+	{"aghdasiyeh", "اقدسیه"},
+	{"kamraniyeh", "کامرانیه"},
+	{"zafaraniyeh", "زعفرانیه"},
+	{"jordan", "جردن"},
+	{"fereshteh", "فرشته"},
+	{"elahiyeh", "الهیه"},
+	{"pasdaran", "پاسداران"},
+	{"dorous", "دروس"},
+}
+
+var neighborhoodByID = func() map[string]string {
+	m := make(map[string]string, len(neighborhoods))
+	for _, n := range neighborhoods {
+		m[n.ID] = n.Name
+	}
+	return m
+}()
+
+const neighborhoodPrompt = "لطفا محله خود را انتخاب کنید:\n\n⚠️ در حال حاضر خدمات فقط در تهران و محله‌های فوق ارائه می‌شود."
+
+func neighborhoodKeyboard() *bale.InlineKeyboardMarkup {
+	var rows [][]bale.InlineKeyboardButton
+	for i := 0; i < len(neighborhoods); i += 2 {
+		row := []bale.InlineKeyboardButton{{Text: neighborhoods[i].Name, CallbackData: "hood:" + neighborhoods[i].ID}}
+		if i+1 < len(neighborhoods) {
+			row = append(row, bale.InlineKeyboardButton{Text: neighborhoods[i+1].Name, CallbackData: "hood:" + neighborhoods[i+1].ID})
+		}
+		rows = append(rows, row)
+	}
+	rows = append(rows, supportButtonRow())
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // sendPaymentInvoice asks Bale to charge the customer's wallet via a native

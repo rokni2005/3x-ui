@@ -77,10 +77,13 @@ type Update struct {
 	PreCheckoutQuery *PreCheckoutQuery `json:"pre_checkout_query,omitempty"`
 }
 
-// InlineKeyboardButton is one button of an inline keyboard.
+// InlineKeyboardButton is one button of an inline keyboard. Exactly one of
+// CallbackData (handled by the bot) or URL (opened directly by the client,
+// e.g. to start a chat with support) is normally set.
 type InlineKeyboardButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 // InlineKeyboardMarkup is an inline keyboard attached to a message.
