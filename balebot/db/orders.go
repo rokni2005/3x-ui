@@ -71,6 +71,21 @@ func (o Order) HasLocation() bool {
 	return o.CustomerLat != nil && o.CustomerLng != nil
 }
 
+// ItemsTotal sums the frozen line prices of Items, i.e. Total minus the
+// delivery fee.
+func (o Order) ItemsTotal() int {
+	sum := 0
+	for _, item := range o.Items {
+		sum += int(item.WeightKg * float64(item.PricePerKg))
+	}
+	return sum
+}
+
+// DeliveryFee is the delivery portion of Total (0 for a free-delivery order).
+func (o Order) DeliveryFee() int {
+	return o.Total - o.ItemsTotal()
+}
+
 // StatusLabel renders Status in Persian for display in the admin panel and
 // bot messages.
 func (o Order) StatusLabel() string {

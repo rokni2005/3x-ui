@@ -423,6 +423,8 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 			<div class="body">
 				<div class="items">{{range .Items}}{{.Emoji}} {{.Name}} ({{weight .WeightKg}} کیلو) &nbsp;{{end}}</div>
 				<div class="totals">
+					<span>جمع اقلام: {{toman .ItemsTotal}} تومان</span>
+					{{if gt .DeliveryFee 0}}<span>🚚 پیک: {{toman .DeliveryFee}} تومان</span>{{else}}<span>🚚 پیک: رایگان</span>{{end}}
 					<span>جمع کل: {{toman .Total}} تومان</span>
 					{{if .PaymentVerified}}
 						<span>پرداخت‌شده: {{toman .Deposit}} تومان</span>

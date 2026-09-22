@@ -40,12 +40,34 @@ const (
 	// resolve correctly, the actual Bale username should be swapped in
 	// here instead of the phone-number-shaped id.
 	supportChatURL = "https://ble.ir/9104304566"
+
+	// Delivery fee: free for orders at or above the threshold, a flat fee
+	// below it. Both are in Toman, applied to the cart's item subtotal
+	// (before the fee itself).
+	freeDeliveryThreshold = 1000000
+	deliveryFeeAmount     = 120000
 )
 
 // supportButtonRow is appended to every keyboard shown during the ordering
 // flow, so a customer can always reach support with one tap.
 func supportButtonRow() []bale.InlineKeyboardButton {
 	return []bale.InlineKeyboardButton{{Text: "🆘 پشتیبانی", URL: supportChatURL}}
+}
+
+// deliveryFeeFor returns the delivery fee for a cart whose items add up to
+// itemsTotal Toman.
+func deliveryFeeFor(itemsTotal int) int {
+	if itemsTotal >= freeDeliveryThreshold {
+		return 0
+	}
+	return deliveryFeeAmount
+}
+
+// orderGrandTotal is what the customer actually owes: the cart's item
+// subtotal plus delivery.
+func orderGrandTotal(sess *Session) int {
+	itemsTotal := sess.Total()
+	return itemsTotal + deliveryFeeFor(itemsTotal)
 }
 
 // Config holds the deposit/payment details shown to customers.
@@ -129,7 +151,7 @@ func (b *Bot) handlePreCheckoutQuery(q bale.PreCheckoutQuery) {
 	case depositInvoicePayload:
 		expectedToman = b.cfg.DepositAmount
 	case fullInvoicePayload:
-		expectedToman = b.sessions.Get(q.From.ID).Total()
+		expectedToman = orderGrandTotal(b.sessions.Get(q.From.ID))
 	default:
 		expectedToman = -1 // unknown payload: never matches, always rejected below
 	}
@@ -455,7 +477,7 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		payload := depositInvoicePayload
 		label := "ودیعه سفارش"
 		if full {
-			amount = sess.Total()
+			amount = orderGrandTotal(sess)
 			payload = fullInvoicePayload
 			label = "مبلغ کامل سفارش"
 		}
@@ -666,7 +688,15 @@ func cartText(sess *Session) string {
 	for _, item := range sess.Cart {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
-	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان", FormatToman(sess.Total())))
+	itemsTotal := sess.Total()
+	fee := deliveryFeeFor(itemsTotal)
+	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان\n", FormatToman(itemsTotal)))
+	if fee > 0 {
+		sb.WriteString(fmt.Sprintf("🚚 هزینه پیک: %s تومان (سفارش‌های بالای %s تومان پیک رایگان دارند)\n", FormatToman(fee), FormatToman(freeDeliveryThreshold)))
+	} else {
+		sb.WriteString("🚚 هزینه پیک: رایگان 🎉\n")
+	}
+	sb.WriteString(fmt.Sprintf("جمع کل: %s تومان", FormatToman(itemsTotal+fee)))
 	return sb.String()
 }
 
@@ -695,7 +725,9 @@ func (b *Bot) editCart(chatID, messageID int64, sess *Session) {
 }
 
 func (b *Bot) sendInvoice(chatID int64, sess *Session) {
-	total := sess.Total()
+	itemsTotal := sess.Total()
+	fee := deliveryFeeFor(itemsTotal)
+	total := itemsTotal + fee
 	deposit := b.cfg.DepositAmount
 	remaining := total - deposit
 	if remaining < 0 {
@@ -707,8 +739,13 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	for _, item := range sess.Cart {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
-	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان\n", FormatToman(total)))
-	sb.WriteString("🚚 ارسال ما رایگانه!\n\n")
+	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان\n", FormatToman(itemsTotal)))
+	if fee > 0 {
+		sb.WriteString(fmt.Sprintf("🚚 هزینه پیک: %s تومان\n", FormatToman(fee)))
+	} else {
+		sb.WriteString("🚚 هزینه پیک: رایگان 🎉\n")
+	}
+	sb.WriteString(fmt.Sprintf("جمع کل: %s تومان\n\n", FormatToman(total)))
 	sb.WriteString(fmt.Sprintf("برای ثبت نهایی سفارش، مبلغ %s تومان بابت ودیعه پرداخت می‌شود و مابقی مبلغ (%s تومان) پس از تحویل سفارش دریافت خواهد شد.\n\n", FormatToman(deposit), FormatToman(remaining)))
 	sb.WriteString(fmt.Sprintf("📍 آدرس: %s\n📞 شماره تماس: %s", sess.Address, sess.Phone))
 
@@ -812,7 +849,7 @@ func (b *Bot) createDraftOrder(chatID int64, sess *Session, paidAmount int, veri
 		Address:         sess.Address,
 		Phone:           sess.Phone,
 		Items:           items,
-		Total:           sess.Total(),
+		Total:           orderGrandTotal(sess),
 		Deposit:         paidAmount,
 		PaymentVerified: verified,
 	})
@@ -851,7 +888,7 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 				WeightKg: item.WeightKg, PricePerKg: item.PricePerKg,
 			})
 		}
-		total := sess.Total()
+		total := orderGrandTotal(sess)
 		paid := b.cfg.DepositAmount
 		if sess.PayingFull {
 			paid = total
@@ -923,6 +960,12 @@ func adminOrderText(o db.Order) string {
 	sb.WriteString(fmt.Sprintf("📦 سفارش #%d — %s\n👤 %s\n\n", o.ID, o.StatusLabel(), name))
 	for _, item := range o.Items {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
+	}
+	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان", FormatToman(o.ItemsTotal())))
+	if fee := o.DeliveryFee(); fee > 0 {
+		sb.WriteString(fmt.Sprintf("\nهزینه پیک: %s تومان", FormatToman(fee)))
+	} else {
+		sb.WriteString("\nهزینه پیک: رایگان")
 	}
 	sb.WriteString(fmt.Sprintf("\nجمع کل: %s تومان", FormatToman(o.Total)))
 	if !o.PaymentVerified {
