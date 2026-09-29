@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ const (
 	adminStatsButton    = "📊 آمار"
 	adminWalletsButton  = "👛 کیف‌پول‌های بدهکار"
 	adminFruitsButton   = "🍉 قیمت میوه‌ها"
+	adminBackupButton   = "💾 بکاپ دیتابیس"
 
 	// supportChatURL opens a direct chat with support on Bale. This is a
 	// best-effort profile link (mirrors Telegram's t.me/<username> scheme,
@@ -1095,6 +1097,7 @@ func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 		Keyboard: [][]bale.KeyboardButton{
 			{{Text: adminOrdersButton}, {Text: adminStatsButton}},
 			{{Text: adminWalletsButton}, {Text: adminFruitsButton}},
+			{{Text: adminBackupButton}},
 		},
 		ResizeKeyboard: true,
 	}
@@ -1116,6 +1119,8 @@ func (b *Bot) handleAdminMessage(chatID int64, text string) {
 		b.sendWalletsToAdmin(chatID)
 	case adminFruitsButton, "/fruits":
 		b.sendFruitsToAdmin(chatID)
+	case adminBackupButton, "/backup":
+		b.sendDatabaseBackup(chatID)
 	case "/start":
 		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nاز دکمه‌های پایین صفحه استفاده کنید.", adminMenuKeyboard())
 	default:
@@ -1157,6 +1162,35 @@ func (b *Bot) sendFruitsToAdmin(chatID int64) {
 	}
 	sb.WriteString("\nبرای ویرایش قیمت، عکس یا افزودن/حذف میوه، از پنل وب ادمین استفاده کنید.")
 	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
+}
+
+// sendDatabaseBackup takes a consistent snapshot of the live SQLite
+// database (via db.Store.Backup, safe to run while the bot keeps serving
+// requests) and sends it to the admin as a document, so a backup is always
+// just one tap away instead of requiring server/SSH access.
+func (b *Bot) sendDatabaseBackup(chatID int64) {
+	backupPath := filepath.Join(os.TempDir(), fmt.Sprintf("balebot-backup-%s.db", time.Now().Format("20060102-150405")))
+	if err := b.data.Backup(backupPath); err != nil {
+		log.Printf("Backup: %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در تهیه بکاپ.", adminMenuKeyboard())
+		return
+	}
+	defer os.Remove(backupPath)
+
+	f, err := os.Open(backupPath)
+	if err != nil {
+		log.Printf("open backup file: %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در خواندن فایل بکاپ.", adminMenuKeyboard())
+		return
+	}
+	defer f.Close()
+
+	caption := fmt.Sprintf("💾 بکاپ دیتابیس — %s", time.Now().Format("2006-01-02 15:04"))
+	if _, err := b.api.SendDocument(chatID, filepath.Base(backupPath), f, caption); err != nil {
+		log.Printf("SendDocument (backup): %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در ارسال فایل بکاپ.", adminMenuKeyboard())
+		return
+	}
 }
 
 // sendRecentOrdersToAdmin sends each recent order as its own message with

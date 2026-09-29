@@ -103,6 +103,15 @@ func (s *Store) Close() error {
 	return s.conn.Close()
 }
 
+// Backup writes a consistent snapshot of the live database to destPath.
+// Safe to call while the bot is running: VACUUM INTO takes its own read
+// transaction, unlike a raw file copy of a WAL-mode database (which could
+// catch a half-written page and produce a corrupt backup).
+func (s *Store) Backup(destPath string) error {
+	_, err := s.conn.Exec("VACUUM INTO ?", destPath)
+	return err
+}
+
 // addColumnIfMissing lets us evolve the schema (e.g. adding fruits.photo_path
 // to a database created before this field existed) without erroring on
 // every later startup once the column is already there.

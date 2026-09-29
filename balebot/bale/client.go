@@ -155,6 +155,24 @@ func (c *Client) SendPhoto(chatID int64, filename string, photo io.Reader, capti
 	return &msg, nil
 }
 
+// SendDocument uploads an arbitrary file (e.g. a database backup) as a
+// document message, with an optional caption. Like SendPhoto, this uploads
+// the bytes directly so no publicly reachable URL is needed.
+func (c *Client) SendDocument(chatID int64, filename string, document io.Reader, caption string) (*Message, error) {
+	fields := map[string]string{
+		"chat_id": strconv.FormatInt(chatID, 10),
+	}
+	if caption != "" {
+		fields["caption"] = caption
+	}
+
+	var msg Message
+	if err := c.callMultipart("sendDocument", fields, "document", filename, document, &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
 // EditMessageCaption edits the caption/keyboard of a previously sent photo message.
 func (c *Client) EditMessageCaption(chatID, messageID int64, caption string, markup any) error {
 	params := map[string]any{
