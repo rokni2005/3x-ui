@@ -468,6 +468,14 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		sess.DeliveryMode = mode
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 
+		if sess.Stage == StageInvoice {
+			// Changed their mind from the invoice screen (e.g. switching to
+			// tomorrow to save on the express fee) — address/phone are
+			// already known, just re-render the invoice with new pricing.
+			b.sendInvoice(chatID, sess)
+			return
+		}
+
 		addresses, err := b.data.ListAddresses(chatID)
 		if err != nil {
 			log.Printf("ListAddresses(%d): %v", chatID, err)
@@ -525,6 +533,10 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		sess.Stage = StageAwaitingPhone
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 		b.api.SendMessage(chatID, "لطفا شماره تماس تحویل‌گیرنده را وارد کنید:", nil)
+
+	case data == "invoice:change_delivery":
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.api.SendMessage(chatID, deliveryPrompt, deliveryKeyboard())
 
 	case data == "pay:deposit" || data == "pay:full":
 		full := data == "pay:full"
@@ -817,6 +829,11 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	sb.WriteString(fmt.Sprintf("برای ثبت نهایی سفارش، مبلغ %s تومان بابت ودیعه پرداخت می‌شود و مابقی مبلغ (%s تومان) پس از تحویل سفارش دریافت خواهد شد.\n\n", FormatToman(deposit), FormatToman(remaining)))
 	sb.WriteString(fmt.Sprintf("📍 آدرس: %s\n📞 شماره تماس: %s", sess.Address, sess.Phone))
 
+	changeDeliveryLabel := "🔄 تغییر به ارسال فوری (هزینه بیشتر)"
+	if sess.DeliveryMode == DeliveryExpress {
+		changeDeliveryLabel = "🔄 تغییر به ارسال فردا (هزینه کمتر)"
+	}
+
 	var rows [][]bale.InlineKeyboardButton
 	if b.cfg.PaymentProviderToken != "" {
 		rows = append(rows,
@@ -826,6 +843,7 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	}
 	rows = append(rows,
 		[]bale.InlineKeyboardButton{{Text: fmt.Sprintf("🏦 واریز کارت‌به‌کارت (ودیعه %s تومان)", FormatToman(deposit)), CallbackData: "pay:manual"}},
+		[]bale.InlineKeyboardButton{{Text: changeDeliveryLabel, CallbackData: "invoice:change_delivery"}},
 		supportButtonRow(),
 	)
 	b.api.SendMessage(chatID, sb.String(), &bale.InlineKeyboardMarkup{InlineKeyboard: rows})
