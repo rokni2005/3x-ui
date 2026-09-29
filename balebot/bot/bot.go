@@ -35,6 +35,7 @@ const (
 	adminWalletsButton  = "👛 کیف‌پول‌های بدهکار"
 	adminFruitsButton   = "🍉 قیمت میوه‌ها"
 	adminBackupButton   = "💾 بکاپ دیتابیس"
+	adminRestoreButton  = "♻️ بازیابی از بکاپ"
 
 	// supportChatURL opens a direct chat with support on Bale. This is a
 	// best-effort profile link (mirrors Telegram's t.me/<username> scheme,
@@ -113,6 +114,11 @@ type Config struct {
 	// isn't fully documented here, so this defaults to 10 (Toman -> Rial)
 	// but is meant to be corrected via config after a real test payment.
 	PaymentAmountMultiplier int
+
+	// DBPath is the live SQLite database file's path, needed by the
+	// admin-triggered restore flow to stage an upload next to it (for an
+	// atomic same-filesystem rename) and to hand off to db.Store.Restore.
+	DBPath string
 }
 
 // Bot wires together the Bale API client, the persistent catalog/orders
@@ -122,6 +128,17 @@ type Bot struct {
 	sessions *Store
 	data     *db.Store
 	cfg      Config
+
+	// restoreStagedPath is set once the admin has uploaded a backup file
+	// for a pending restore (staged next to the live DB, awaiting
+	// confirmation), and cleared on confirm or cancel. The admin chat is
+	// single-user and updates are processed sequentially, so a plain field
+	// (no mutex) is safe here, same as Bot.Run's own offset variable.
+	restoreStagedPath string
+	// awaitingRestoreUpload is true right after the admin taps the restore
+	// button, until they send a document (or another admin message cancels
+	// it implicitly by moving on).
+	awaitingRestoreUpload bool
 }
 
 // New builds a Bot ready to Run.
@@ -200,6 +217,10 @@ func (b *Bot) handleMessage(msg bale.Message) {
 	text := strings.TrimSpace(msg.Text)
 
 	if b.cfg.AdminChatID != 0 && chatID == b.cfg.AdminChatID {
+		if msg.Document != nil {
+			b.handleAdminDocument(chatID, *msg.Document)
+			return
+		}
 		b.handleAdminMessage(chatID, text)
 		return
 	}
@@ -563,6 +584,18 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		if err := b.api.EditMessageText(chatID, messageID, adminOrderText(*order), adminOrderKeyboard(*order)); err != nil {
 			log.Printf("EditMessageText (ship order #%d): %v", order.ID, err)
 		}
+
+	case chatID == b.cfg.AdminChatID && data == "restore:confirm":
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.performRestore(chatID)
+
+	case chatID == b.cfg.AdminChatID && data == "restore:cancel":
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		if b.restoreStagedPath != "" {
+			os.Remove(b.restoreStagedPath)
+			b.restoreStagedPath = ""
+		}
+		b.api.SendMessage(chatID, "بازیابی لغو شد.", adminMenuKeyboard())
 
 	default:
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
@@ -1132,7 +1165,7 @@ func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 		Keyboard: [][]bale.KeyboardButton{
 			{{Text: adminOrdersButton}, {Text: adminStatsButton}},
 			{{Text: adminWalletsButton}, {Text: adminFruitsButton}},
-			{{Text: adminBackupButton}},
+			{{Text: adminBackupButton}, {Text: adminRestoreButton}},
 		},
 		ResizeKeyboard: true,
 	}
@@ -1145,6 +1178,13 @@ func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 // the admin to check recent orders from inside the bot chat itself.
 
 func (b *Bot) handleAdminMessage(chatID int64, text string) {
+	if text != adminRestoreButton && text != "/restore" {
+		// Any other admin message means they didn't follow through with
+		// the upload — drop the pending-file expectation so a stray file
+		// sent later (unrelated to restore) isn't mistaken for one.
+		b.awaitingRestoreUpload = false
+	}
+
 	switch text {
 	case adminOrdersButton, "/orders":
 		b.sendRecentOrdersToAdmin(chatID)
@@ -1156,11 +1196,109 @@ func (b *Bot) handleAdminMessage(chatID int64, text string) {
 		b.sendFruitsToAdmin(chatID)
 	case adminBackupButton, "/backup":
 		b.sendDatabaseBackup(chatID)
+	case adminRestoreButton, "/restore":
+		b.awaitingRestoreUpload = true
+		b.api.SendMessage(chatID,
+			"لطفا فایل بکاپ (.db) رو همین‌جا به‌عنوان فایل (نه عکس) بفرستید.\n\n⚠️ بعد از تایید نهایی، این فایل جایگزین کامل دیتابیس فعلی می‌شه. قبلش یک بکاپ ایمنی از وضعیت الان خودکار گرفته و براتون فرستاده می‌شه.",
+			adminMenuKeyboard())
 	case "/start":
 		b.api.SendMessage(chatID, "👋 پنل مدیریت ربات میوه.\nاز دکمه‌های پایین صفحه استفاده کنید.", adminMenuKeyboard())
 	default:
 		b.api.SendMessage(chatID, "متوجه نشدم 🙏 از دکمه‌های پایین صفحه استفاده کنید.", adminMenuKeyboard())
 	}
+}
+
+// handleAdminDocument is reached when the admin sends a file while a
+// restore is pending (set by the "♻️ بازیابی از بکاپ" button). It stages
+// the upload next to the live database, sanity-checks it looks like a real
+// balebot backup, and asks for explicit confirmation before anything
+// touches the live data.
+func (b *Bot) handleAdminDocument(chatID int64, doc bale.Document) {
+	if !b.awaitingRestoreUpload {
+		return
+	}
+	b.awaitingRestoreUpload = false
+
+	filePath, err := b.api.GetFile(doc.FileID)
+	if err != nil {
+		log.Printf("GetFile: %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در دریافت اطلاعات فایل از بله.", adminMenuKeyboard())
+		return
+	}
+	data, err := b.api.DownloadFile(filePath)
+	if err != nil {
+		log.Printf("DownloadFile: %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در دانلود فایل.", adminMenuKeyboard())
+		return
+	}
+
+	// Staged in the same directory as the live DB so the eventual rename
+	// in db.Store.Restore is on the same filesystem (atomic).
+	stagedPath := filepath.Join(filepath.Dir(b.cfg.DBPath), ".restore-staged.db")
+	if err := os.WriteFile(stagedPath, data, 0o600); err != nil {
+		log.Printf("write staged restore file: %v", err)
+		b.api.SendMessage(chatID, "❌ خطا در ذخیره فایل روی سرور.", adminMenuKeyboard())
+		return
+	}
+
+	summary, err := db.InspectBackupFile(stagedPath)
+	if err != nil {
+		os.Remove(stagedPath)
+		log.Printf("InspectBackupFile: %v", err)
+		b.api.SendMessage(chatID, fmt.Sprintf("❌ این فایل یک بکاپ معتبر ربات میوه نیست:\n%v", err), adminMenuKeyboard())
+		return
+	}
+
+	b.restoreStagedPath = stagedPath
+	text := fmt.Sprintf(
+		"📦 فایل بررسی شد:\n🍉 %d میوه\n📦 %d سفارش\n👤 %d مشتری\n\n⚠️ با تایید، دیتابیس فعلی کاملاً با این فایل جایگزین می‌شه (سفارش‌ها/مشتری‌های ثبت‌شده بعد از تاریخ این بکاپ از دست می‌رن). قبلش یک بکاپ ایمنی از وضعیت الان گرفته و براتون فرستاده می‌شه تا در صورت اشتباه بتونید برگردونید.\n\nادامه بدم؟",
+		summary.Fruits, summary.Orders, summary.Customers,
+	)
+	b.api.SendMessage(chatID, text, restoreConfirmKeyboard())
+}
+
+func restoreConfirmKeyboard() *bale.InlineKeyboardMarkup {
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{{Text: "✅ بله، جایگزین کن", CallbackData: "restore:confirm"}},
+		{{Text: "❌ انصراف", CallbackData: "restore:cancel"}},
+	}}
+}
+
+// performRestore takes a fresh safety backup of the live database (and
+// hands it to the admin), then replaces the live file with the staged
+// upload and deliberately exits the process — systemd (Restart=on-failure)
+// brings it back up moments later with a clean connection to whichever
+// file ended up on disk, which is far safer than trying to keep serving
+// requests through a live file-swap underneath an open connection.
+func (b *Bot) performRestore(chatID int64) {
+	stagedPath := b.restoreStagedPath
+	b.restoreStagedPath = ""
+	if stagedPath == "" {
+		b.api.SendMessage(chatID, "❌ هیچ فایلی برای بازیابی در انتظار نیست.", adminMenuKeyboard())
+		return
+	}
+
+	safetyPath := filepath.Join(os.TempDir(), fmt.Sprintf("balebot-before-restore-%s.db", time.Now().Format("20060102-150405")))
+	if err := b.data.Backup(safetyPath); err != nil {
+		log.Printf("safety Backup before restore: %v", err)
+		b.api.SendMessage(chatID, "❌ نتونستم قبل از بازیابی یک بکاپ ایمنی بگیرم — برای احتیاط، بازیابی انجام نشد.", adminMenuKeyboard())
+		os.Remove(stagedPath)
+		return
+	}
+	if f, err := os.Open(safetyPath); err == nil {
+		b.api.SendDocument(chatID, filepath.Base(safetyPath), f, "💾 بکاپ ایمنی از قبل از بازیابی — اگه چیزی اشتباه شد، همینو نگه دارید")
+		f.Close()
+	}
+	os.Remove(safetyPath)
+
+	b.api.SendMessage(chatID, "⏳ در حال جایگزینی دیتابیس... سرویس چند ثانیه دیگه خودکار ری‌استارت می‌شه.", nil)
+
+	if err := b.data.Restore(stagedPath); err != nil {
+		log.Printf("Restore: %v (exiting anyway so systemd restarts cleanly against whatever ended up on disk)", err)
+	} else {
+		log.Printf("database restored from admin-uploaded backup")
+	}
+	os.Exit(1)
 }
 
 func (b *Bot) sendWalletsToAdmin(chatID int64) {

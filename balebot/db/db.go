@@ -6,6 +6,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -53,7 +54,13 @@ CREATE TABLE IF NOT EXISTS addresses (
 // Store wraps the SQLite connection used by the bot and the admin panel.
 type Store struct {
 	conn      *sql.DB
+	path      string
 	photosDir string
+}
+
+// Path returns the filesystem path this Store was opened against.
+func (s *Store) Path() string {
+	return s.path
 }
 
 // Open creates/opens the SQLite file at path, applies the schema and, on a
@@ -91,7 +98,7 @@ func Open(path, photosDir string) (*Store, error) {
 		}
 	}
 
-	store := &Store{conn: conn, photosDir: photosDir}
+	store := &Store{conn: conn, path: path, photosDir: photosDir}
 	if err := store.seedFruitsIfEmpty(); err != nil {
 		conn.Close()
 		return nil, err
@@ -111,6 +118,59 @@ func (s *Store) Close() error {
 func (s *Store) Backup(destPath string) error {
 	_, err := s.conn.Exec("VACUUM INTO ?", destPath)
 	return err
+}
+
+// BackupSummary describes what a candidate restore file contains, so the
+// admin can sanity-check it before confirming a restore.
+type BackupSummary struct {
+	Fruits    int
+	Orders    int
+	Customers int
+}
+
+// InspectBackupFile opens path read-only (a separate, short-lived
+// connection — the live Store is untouched) and counts rows in the tables
+// a real balebot database should have. An error here means the file isn't
+// a usable balebot backup (wrong file, corrupted upload, etc.), and the
+// caller should refuse to restore from it.
+func InspectBackupFile(path string) (BackupSummary, error) {
+	var sum BackupSummary
+	conn, err := sql.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(2000)")
+	if err != nil {
+		return sum, fmt.Errorf("open candidate file: %w", err)
+	}
+	defer conn.Close()
+
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM fruits`).Scan(&sum.Fruits); err != nil {
+		return sum, fmt.Errorf("not a valid balebot database (fruits table): %w", err)
+	}
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM orders`).Scan(&sum.Orders); err != nil {
+		return sum, fmt.Errorf("not a valid balebot database (orders table): %w", err)
+	}
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM customers`).Scan(&sum.Customers); err != nil {
+		return sum, fmt.Errorf("not a valid balebot database (customers table): %w", err)
+	}
+	return sum, nil
+}
+
+// Restore closes the live connection and atomically replaces the store's
+// own database file with stagedPath (which must be on the same filesystem
+// — stage uploads next to Path() to guarantee this). It does not reopen
+// the connection: the intended caller is the bot's restore flow, which
+// exits the process right after so systemd restarts it fresh against the
+// swapped file — safer than trying to keep serving requests through a
+// live file-swap.
+func (s *Store) Restore(stagedPath string) error {
+	if err := s.conn.Close(); err != nil {
+		return fmt.Errorf("close before restore: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		os.Remove(s.path + suffix) // sidecar files for the OLD data; best-effort cleanup
+	}
+	if err := os.Rename(stagedPath, s.path); err != nil {
+		return fmt.Errorf("replace %s: %w", s.path, err)
+	}
+	return nil
 }
 
 // addColumnIfMissing lets us evolve the schema (e.g. adding fruits.photo_path

@@ -18,6 +18,13 @@ type PhotoSize struct {
 	FileID string `json:"file_id"`
 }
 
+// Document is an arbitrary uploaded file (e.g. a database backup sent to
+// the admin for a restore).
+type Document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+}
+
 // Location is a geographic point shared by a user, e.g. in response to a
 // request_location reply-keyboard button.
 type Location struct {
@@ -32,6 +39,7 @@ type Message struct {
 	Chat              Chat               `json:"chat"`
 	Text              string             `json:"text"`
 	Photo             []PhotoSize        `json:"photo"`
+	Document          *Document          `json:"document,omitempty"`
 	Location          *Location          `json:"location,omitempty"`
 	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
 }

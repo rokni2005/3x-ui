@@ -38,6 +38,7 @@ func main() {
 		PaymentProviderToken:    os.Getenv("PAYMENT_PROVIDER_TOKEN"),
 		PaymentCurrency:         getEnv("PAYMENT_CURRENCY", "IRR"),
 		PaymentAmountMultiplier: 10,
+		DBPath:                  dbPath,
 	}
 	if v := os.Getenv("DEPOSIT_AMOUNT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

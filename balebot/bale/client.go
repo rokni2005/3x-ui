@@ -16,6 +16,14 @@ import (
 
 const apiBaseURL = "https://tapi.bale.ai/bot%s/%s"
 
+// fileBaseURL is where an uploaded file's bytes are actually downloaded
+// from, once getFile has resolved a file_id to a file_path — mirroring the
+// Telegram Bot API's file download convention, which Bale's Bot API
+// otherwise follows closely. Unverified against Bale's own docs (which
+// weren't reachable while building this); DownloadFile logs a clear error
+// if this shape turns out to be wrong.
+const fileBaseURL = "https://tapi.bale.ai/file/bot%s/%s"
+
 // Client talks to the Bale Bot API over HTTPS.
 type Client struct {
 	token      string
@@ -171,6 +179,37 @@ func (c *Client) SendDocument(chatID int64, filename string, document io.Reader,
 		return nil, err
 	}
 	return &msg, nil
+}
+
+// GetFile resolves a file_id (e.g. from an incoming Document) to a
+// file_path that DownloadFile can fetch.
+func (c *Client) GetFile(fileID string) (string, error) {
+	var result struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := c.call("getFile", map[string]any{"file_id": fileID}, &result); err != nil {
+		return "", err
+	}
+	return result.FilePath, nil
+}
+
+// DownloadFile fetches the raw bytes of a file previously resolved via GetFile.
+func (c *Client) DownloadFile(filePath string) ([]byte, error) {
+	url := fmt.Sprintf(fileBaseURL, c.token, filePath)
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("bale: download %s: %w", filePath, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("bale: read download %s: %w", filePath, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bale: download %s: HTTP %d: %s", filePath, resp.StatusCode, string(data))
+	}
+	return data, nil
 }
 
 // EditMessageCaption edits the caption/keyboard of a previously sent photo message.
