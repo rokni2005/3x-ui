@@ -43,11 +43,16 @@ const (
 	// here instead of the phone-number-shaped id.
 	supportChatURL = "https://ble.ir/9104304566"
 
-	// Delivery fee: free for orders at or above the threshold, a flat fee
-	// below it. Both are in Toman, applied to the cart's item subtotal
-	// (before the fee itself).
+	// Standard (next-day) delivery fee: free for orders at or above the
+	// threshold, a flat fee below it. Both are in Toman, applied to the
+	// cart's item subtotal (before the fee itself).
 	freeDeliveryThreshold = 1000000
 	deliveryFeeAmount     = 120000
+
+	// Express (same-day, 15:00-19:00) delivery fee: a percentage of the
+	// item subtotal, with a floor so small express orders aren't underpriced.
+	expressFeePercent = 10
+	expressMinFee     = 200000
 )
 
 // supportButtonRow is appended to every keyboard shown during the ordering
@@ -57,8 +62,16 @@ func supportButtonRow() []bale.InlineKeyboardButton {
 }
 
 // deliveryFeeFor returns the delivery fee for a cart whose items add up to
-// itemsTotal Toman.
-func deliveryFeeFor(itemsTotal int) int {
+// itemsTotal Toman, under the given delivery mode (db.DeliveryExpress or
+// db.DeliveryTomorrow/"" — anything other than express is priced as standard).
+func deliveryFeeFor(itemsTotal int, mode string) int {
+	if mode == db.DeliveryExpress {
+		fee := itemsTotal * expressFeePercent / 100
+		if fee < expressMinFee {
+			fee = expressMinFee
+		}
+		return fee
+	}
 	if itemsTotal >= freeDeliveryThreshold {
 		return 0
 	}
@@ -66,10 +79,20 @@ func deliveryFeeFor(itemsTotal int) int {
 }
 
 // orderGrandTotal is what the customer actually owes: the cart's item
-// subtotal plus delivery.
+// subtotal plus delivery (priced per the session's chosen delivery mode).
 func orderGrandTotal(sess *Session) int {
 	itemsTotal := sess.Total()
-	return itemsTotal + deliveryFeeFor(itemsTotal)
+	return itemsTotal + deliveryFeeFor(itemsTotal, sess.DeliveryMode)
+}
+
+const deliveryPrompt = "زمان ارسال سفارش رو انتخاب کنید:"
+
+func deliveryKeyboard() *bale.InlineKeyboardMarkup {
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{{Text: "🚀 ارسال فوری (امروز، ۱۵ تا ۱۹)", CallbackData: "delivery:" + db.DeliveryExpress}},
+		{{Text: "📅 ارسال فردا", CallbackData: "delivery:" + db.DeliveryTomorrow}},
+		supportButtonRow(),
+	}}
 }
 
 // Config holds the deposit/payment details shown to customers.
@@ -411,7 +434,19 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			b.api.AnswerCallbackQuery(cq.ID, "سبد خرید شما خالی است", true)
 			return
 		}
+		sess.Stage = StageChoosingDelivery
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.api.SendMessage(chatID, deliveryPrompt, deliveryKeyboard())
+
+	case strings.HasPrefix(data, "delivery:"):
+		mode := strings.TrimPrefix(data, "delivery:")
+		if mode != db.DeliveryExpress && mode != db.DeliveryTomorrow {
+			b.api.AnswerCallbackQuery(cq.ID, "", false)
+			return
+		}
+		sess.DeliveryMode = mode
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+
 		addresses, err := b.data.ListAddresses(chatID)
 		if err != nil {
 			log.Printf("ListAddresses(%d): %v", chatID, err)
@@ -690,15 +725,8 @@ func cartText(sess *Session) string {
 	for _, item := range sess.Cart {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
-	itemsTotal := sess.Total()
-	fee := deliveryFeeFor(itemsTotal)
-	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان\n", FormatToman(itemsTotal)))
-	if fee > 0 {
-		sb.WriteString(fmt.Sprintf("🚚 هزینه پیک: %s تومان (سفارش‌های بالای %s تومان پیک رایگان دارند)\n", FormatToman(fee), FormatToman(freeDeliveryThreshold)))
-	} else {
-		sb.WriteString("🚚 هزینه پیک: رایگان 🎉\n")
-	}
-	sb.WriteString(fmt.Sprintf("جمع کل: %s تومان", FormatToman(itemsTotal+fee)))
+	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان\n", FormatToman(sess.Total())))
+	sb.WriteString("🚚 هزینه پیک بسته به زمان ارسال (فوری/فردا) که در مرحله بعد انتخاب می‌کنید محاسبه می‌شود.")
 	return sb.String()
 }
 
@@ -728,7 +756,7 @@ func (b *Bot) editCart(chatID, messageID int64, sess *Session) {
 
 func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 	itemsTotal := sess.Total()
-	fee := deliveryFeeFor(itemsTotal)
+	fee := deliveryFeeFor(itemsTotal, sess.DeliveryMode)
 	total := itemsTotal + fee
 	deposit := b.cfg.DepositAmount
 	remaining := total - deposit
@@ -742,10 +770,15 @@ func (b *Bot) sendInvoice(chatID int64, sess *Session) {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم — %s تومان\n", item.Emoji, item.Name, FormatWeight(item.WeightKg), FormatToman(item.LineTotal())))
 	}
 	sb.WriteString(fmt.Sprintf("\nجمع اقلام: %s تومان\n", FormatToman(itemsTotal)))
-	if fee > 0 {
-		sb.WriteString(fmt.Sprintf("🚚 هزینه پیک: %s تومان\n", FormatToman(fee)))
+	if sess.DeliveryMode == DeliveryExpress {
+		sb.WriteString(fmt.Sprintf("🚀 ارسال فوری — بازه تحویل امروز ساعت ۱۵ تا ۱۹\nهزینه پیک: %s تومان\n", FormatToman(fee)))
 	} else {
-		sb.WriteString("🚚 هزینه پیک: رایگان 🎉\n")
+		sb.WriteString("📅 ارسال فردا\n")
+		if fee > 0 {
+			sb.WriteString(fmt.Sprintf("🚚 هزینه پیک: %s تومان\n", FormatToman(fee)))
+		} else {
+			sb.WriteString("🚚 هزینه پیک: رایگان 🎉\n")
+		}
 	}
 	sb.WriteString(fmt.Sprintf("جمع کل: %s تومان\n\n", FormatToman(total)))
 	sb.WriteString(fmt.Sprintf("برای ثبت نهایی سفارش، مبلغ %s تومان بابت ودیعه پرداخت می‌شود و مابقی مبلغ (%s تومان) پس از تحویل سفارش دریافت خواهد شد.\n\n", FormatToman(deposit), FormatToman(remaining)))
@@ -854,6 +887,7 @@ func (b *Bot) createDraftOrder(chatID int64, sess *Session, paidAmount int, veri
 		Total:           orderGrandTotal(sess),
 		Deposit:         paidAmount,
 		PaymentVerified: verified,
+		DeliveryMode:    sess.DeliveryMode,
 	})
 }
 
@@ -901,6 +935,7 @@ func (b *Bot) finalizeOrder(chatID int64, sess *Session, trigger *bale.Message) 
 		order = db.Order{
 			ChatID: chatID, Address: sess.Address, Phone: sess.Phone,
 			Items: items, Total: total, Deposit: paid, PaymentVerified: true,
+			DeliveryMode: sess.DeliveryMode,
 		}
 		id, err := b.data.SaveOrder(order)
 		if err != nil {
@@ -959,7 +994,7 @@ func adminOrderText(o db.Order) string {
 		name = "—"
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📦 سفارش #%d — %s\n👤 %s\n\n", o.ID, o.StatusLabel(), name))
+	sb.WriteString(fmt.Sprintf("📦 سفارش #%d — %s\n👤 %s\n%s\n\n", o.ID, o.StatusLabel(), name, o.DeliveryLabel()))
 	for _, item := range o.Items {
 		sb.WriteString(fmt.Sprintf("%s %s — %s کیلوگرم\n", item.Emoji, item.Name, FormatWeight(item.WeightKg)))
 	}

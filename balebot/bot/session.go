@@ -1,6 +1,10 @@
 package bot
 
-import "sync"
+import (
+	"sync"
+
+	"balebot/db"
+)
 
 // Stage tracks where a customer is in the order conversation.
 type Stage int
@@ -10,11 +14,19 @@ const (
 	StageBrowsing
 	StageViewingFruit
 	StageCart
+	StageChoosingDelivery
 	StageChoosingNeighborhood
 	StageAwaitingAddress
 	StageAwaitingPhone
 	StageInvoice
 	StageAwaitingReceipt
+)
+
+// Delivery mode values (Session.DeliveryMode) — re-exported from db so
+// callers outside this package only need to import one of the two.
+const (
+	DeliveryExpress  = db.DeliveryExpress
+	DeliveryTomorrow = db.DeliveryTomorrow
 )
 
 // CartItem is one fruit line in a customer's cart. Price is frozen at the
@@ -39,6 +51,7 @@ type Session struct {
 	Cart          []CartItem
 	CurrentFruit  string
 	CurrentWeight float64
+	DeliveryMode  string // DeliveryExpress or DeliveryTomorrow, chosen at checkout
 	Neighborhood  string
 	Address       string
 	Phone         string
@@ -107,6 +120,7 @@ func (s *Session) resetOrder() {
 	s.Cart = nil
 	s.CurrentFruit = ""
 	s.CurrentWeight = 0
+	s.DeliveryMode = ""
 	s.Neighborhood = ""
 	s.Address = ""
 	s.Phone = ""

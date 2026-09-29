@@ -413,6 +413,7 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 				<span class="id">سفارش #{{.ID}}{{if .CustomerName}} — {{.CustomerName}}{{end}}</span>
 				<span class="time">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
 			</div>
+			<div style="padding:0 14px; font-size:12px; color:#555;">{{.DeliveryLabel}}</div>
 			<div class="stepper">
 				<span class="step {{if or (eq .Status "confirmed") (eq .Status "shipped")}}done{{else}}current{{end}}">⏳ در انتظار تایید</span>
 				<span class="sep"></span>

@@ -23,6 +23,12 @@ const (
 	StatusShipped   = "shipped"
 )
 
+// Delivery mode values (Order/bot.Session.DeliveryMode).
+const (
+	DeliveryExpress  = "express"
+	DeliveryTomorrow = "tomorrow"
+)
+
 // OrderItem is a line of a placed order, with the price frozen at the
 // moment the customer added it to their cart.
 type OrderItem struct {
@@ -50,8 +56,20 @@ type Order struct {
 	// admin reviews the receipt photo and records the real amount via
 	// ConfirmManualPayment.
 	PaymentVerified bool
-	CustomerName    string // from the customers table; "" if the customer never set a name
-	CreatedAt       time.Time
+	// DeliveryMode is "express" (same-day, 15:00-19:00 window, 10% fee with
+	// a 200,000 Toman floor) or "tomorrow" (next-day, the standard
+	// free-above-threshold/flat-fee delivery pricing).
+	DeliveryMode string
+	CustomerName string // from the customers table; "" if the customer never set a name
+	CreatedAt    time.Time
+}
+
+// DeliveryLabel renders DeliveryMode in Persian for admin display.
+func (o Order) DeliveryLabel() string {
+	if o.DeliveryMode == DeliveryExpress {
+		return "🚀 ارسال فوری (امروز، ساعت ۱۵ تا ۱۹)"
+	}
+	return "📅 ارسال فردا"
 }
 
 // Remaining is how much of Total is still owed after the up-front payment
@@ -113,9 +131,9 @@ func (s *Store) CreateDraftOrder(o Order) (int64, error) {
 		return 0, err
 	}
 	res, err := s.conn.Exec(`
-		INSERT INTO orders (chat_id, address, phone, items_json, total, deposit, status, payment_verified)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, o.ChatID, o.Address, o.Phone, string(itemsJSON), o.Total, o.Deposit, StatusDraft, boolToInt(o.PaymentVerified))
+		INSERT INTO orders (chat_id, address, phone, items_json, total, deposit, status, payment_verified, delivery_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, o.ChatID, o.Address, o.Phone, string(itemsJSON), o.Total, o.Deposit, StatusDraft, boolToInt(o.PaymentVerified), o.DeliveryMode)
 	if err != nil {
 		return 0, err
 	}
@@ -131,9 +149,9 @@ func (s *Store) SaveOrder(o Order) (int64, error) {
 		return 0, err
 	}
 	res, err := s.conn.Exec(`
-		INSERT INTO orders (chat_id, address, phone, items_json, total, deposit, status, payment_verified)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, o.ChatID, o.Address, o.Phone, string(itemsJSON), o.Total, o.Deposit, StatusPending, boolToInt(o.PaymentVerified))
+		INSERT INTO orders (chat_id, address, phone, items_json, total, deposit, status, payment_verified, delivery_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, o.ChatID, o.Address, o.Phone, string(itemsJSON), o.Total, o.Deposit, StatusPending, boolToInt(o.PaymentVerified), o.DeliveryMode)
 	if err != nil {
 		return 0, err
 	}
@@ -157,7 +175,7 @@ func (s *Store) GetLatestDraftOrder(chatID int64) (*Order, error) {
 	return &o, nil
 }
 
-const orderColumns = `o.id, o.chat_id, o.address, o.phone, o.items_json, o.total, o.deposit, o.status, o.customer_lat, o.customer_lng, o.payment_verified, o.created_at, COALESCE(c.first_name, ''), COALESCE(c.last_name, '')`
+const orderColumns = `o.id, o.chat_id, o.address, o.phone, o.items_json, o.total, o.deposit, o.status, o.customer_lat, o.customer_lng, o.payment_verified, o.delivery_mode, o.created_at, COALESCE(c.first_name, ''), COALESCE(c.last_name, '')`
 
 const orderFromJoin = `orders o LEFT JOIN customers c ON c.chat_id = o.chat_id`
 
@@ -172,7 +190,7 @@ func scanOrder(row interface{ Scan(...any) error }) (Order, error) {
 	var o Order
 	var itemsJSON, firstName, lastName string
 	var verified int
-	if err := row.Scan(&o.ID, &o.ChatID, &o.Address, &o.Phone, &itemsJSON, &o.Total, &o.Deposit, &o.Status, &o.CustomerLat, &o.CustomerLng, &verified, &o.CreatedAt, &firstName, &lastName); err != nil {
+	if err := row.Scan(&o.ID, &o.ChatID, &o.Address, &o.Phone, &itemsJSON, &o.Total, &o.Deposit, &o.Status, &o.CustomerLat, &o.CustomerLng, &verified, &o.DeliveryMode, &o.CreatedAt, &firstName, &lastName); err != nil {
 		return o, err
 	}
 	if err := json.Unmarshal([]byte(itemsJSON), &o.Items); err != nil {

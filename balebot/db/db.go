@@ -83,6 +83,7 @@ func Open(path, photosDir string) (*Store, error) {
 		{"customer_lat", "REAL"},
 		{"customer_lng", "REAL"},
 		{"payment_verified", "INTEGER NOT NULL DEFAULT 1"},
+		{"delivery_mode", "TEXT NOT NULL DEFAULT 'tomorrow'"},
 	} {
 		if err := addColumnIfMissing(conn, "orders", col.name, col.def); err != nil {
 			conn.Close()
