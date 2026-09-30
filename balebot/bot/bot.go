@@ -717,11 +717,15 @@ func fruitDetailText(sess *Session, fruit *db.Fruit) string {
 }
 
 func fruitDetailKeyboard(sess *Session, fruit *db.Fruit) *bale.InlineKeyboardMarkup {
+	// Emoji-only ➖/➕ buttons squeezed beside the weight label rendered as
+	// blank buttons in Bale, so the weight gets its own row and the step
+	// buttons carry plain text that is always visible.
+	step := FormatWeight(weightStepKg)
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{{Text: "مقدار انتخابی: " + FormatWeight(sess.CurrentWeight) + " کیلوگرم", CallbackData: "noop"}},
 		{
-			{Text: "➖", CallbackData: "w:dec"},
-			{Text: FormatWeight(sess.CurrentWeight) + " کیلوگرم", CallbackData: "noop"},
-			{Text: "➕", CallbackData: "w:inc"},
+			{Text: "- کم کردن (" + step + " کیلو)", CallbackData: "w:dec"},
+			{Text: "+ زیاد کردن (" + step + " کیلو)", CallbackData: "w:inc"},
 		},
 		{{Text: "✅ افزودن به سبد خرید", CallbackData: "add:" + fruit.ID}},
 		{{Text: "🔙 بازگشت به لیست میوه‌ها", CallbackData: "back:menu"}},
