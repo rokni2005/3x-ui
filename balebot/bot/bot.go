@@ -719,9 +719,9 @@ func fruitDetailText(sess *Session, fruit *db.Fruit) string {
 func fruitDetailKeyboard(sess *Session, fruit *db.Fruit) *bale.InlineKeyboardMarkup {
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
 		{
-			{Text: "➖", CallbackData: "w:dec"},
+			{Text: "- کم کردن", CallbackData: "w:dec"},
 			{Text: FormatWeight(sess.CurrentWeight) + " کیلوگرم", CallbackData: "noop"},
-			{Text: "➕", CallbackData: "w:inc"},
+			{Text: "+ زیاد کردن", CallbackData: "w:inc"},
 		},
 		{{Text: "✅ افزودن به سبد خرید", CallbackData: "add:" + fruit.ID}},
 		{{Text: "🔙 بازگشت به لیست میوه‌ها", CallbackData: "back:menu"}},
