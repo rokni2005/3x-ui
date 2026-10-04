@@ -140,6 +140,10 @@ type Bot struct {
 	// button, until they send a document (or another admin message cancels
 	// it implicitly by moving on).
 	awaitingRestoreUpload bool
+
+	// awaitingPriceFruit is the fruit ID whose new price the admin has been
+	// asked to type (after tapping "ورود قیمت دقیق"); "" when none pending.
+	awaitingPriceFruit string
 }
 
 // New builds a Bot ready to Run.
@@ -598,7 +602,7 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 			log.Printf("EditMessageText (ship order #%d): %v", order.ID, err)
 		}
 
-	case chatID == b.cfg.AdminChatID && (data == "admin:fruits" || strings.HasPrefix(data, "admin:fruit:") || strings.HasPrefix(data, "admin:minw:")):
+	case chatID == b.cfg.AdminChatID && (data == "admin:fruits" || strings.HasPrefix(data, "admin:fruit:") || strings.HasPrefix(data, "admin:minw:") || strings.HasPrefix(data, "admin:price:")):
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
 		b.adminFruitsCallback(chatID, messageID, data)
 
@@ -1368,13 +1372,25 @@ func fruitsListKeyboard(fruits []db.Fruit) *bale.InlineKeyboardMarkup {
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
+const (
+	priceStep = 10000
+	minPrice  = 1000
+	maxPrice  = 50000000
+)
+
 func fruitAdminText(f *db.Fruit) string {
-	return fmt.Sprintf("%s %s\nقیمت: %s تومان/کیلو\nحداقل سفارش: %s کیلوگرم\n\nبا دکمه‌های زیر حداقل سفارش را (هر بار ۰.۵ کیلو) تغییر دهید:",
+	return fmt.Sprintf("%s %s\nقیمت: %s تومان/کیلو\nحداقل سفارش: %s کیلوگرم\n\nقیمت را با دکمه‌های ±۱۰,۰۰۰ تغییر دهید یا «ورود قیمت دقیق» را بزنید و عدد را تایپ کنید. حداقل سفارش هم هر بار ۰.۵ کیلو تغییر می‌کند:",
 		f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg))
 }
 
 func fruitAdminKeyboard(f *db.Fruit) *bale.InlineKeyboardMarkup {
 	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{
+			{Text: "- ۱۰,۰۰۰", CallbackData: "admin:price:" + f.ID + ":dec"},
+			{Text: FormatToman(f.Price) + " تومان", CallbackData: "noop"},
+			{Text: "+ ۱۰,۰۰۰", CallbackData: "admin:price:" + f.ID + ":inc"},
+		},
+		{{Text: "✍️ ورود قیمت دقیق", CallbackData: "admin:price:" + f.ID + ":ask"}},
 		{
 			{Text: "- کم کردن", CallbackData: "admin:minw:" + f.ID + ":dec"},
 			{Text: FormatWeight(f.MinWeightKg) + " کیلوگرم", CallbackData: "noop"},
@@ -1382,6 +1398,46 @@ func fruitAdminKeyboard(f *db.Fruit) *bale.InlineKeyboardMarkup {
 		},
 		{{Text: "🔙 بازگشت به لیست میوه‌ها", CallbackData: "admin:fruits"}},
 	}}
+}
+
+// isAdminMenuText reports whether an admin message is one of the menu
+// buttons or a slash command (as opposed to free text like a typed price).
+func isAdminMenuText(text string) bool {
+	if strings.HasPrefix(text, "/") {
+		return true
+	}
+	switch text {
+	case adminOrdersButton, adminStatsButton, adminWalletsButton, adminFruitsButton, adminBackupButton, adminRestoreButton:
+		return true
+	}
+	return false
+}
+
+// handleAdminPriceInput applies a price the admin typed after tapping
+// "ورود قیمت دقیق" for a fruit. Persian digits and thousands separators are
+// accepted.
+func (b *Bot) handleAdminPriceInput(chatID int64, fruitID, text string) {
+	clean := strings.NewReplacer(",", "", "،", "", "٬", "", " ", "").Replace(normalizeDigits(text))
+	price, err := strconv.Atoi(clean)
+	if err != nil || price < minPrice || price > maxPrice {
+		b.api.SendMessage(chatID, fmt.Sprintf("❌ قیمت نامعتبر است. یک عدد بین %s و %s تومان بفرستید (یا یکی از دکمه‌های منو را بزنید تا لغو شود):", FormatToman(minPrice), FormatToman(maxPrice)), nil)
+		return
+	}
+	f, err := b.data.GetFruit(fruitID)
+	if err != nil || f == nil {
+		b.awaitingPriceFruit = ""
+		b.api.SendMessage(chatID, "❌ میوه پیدا نشد.", adminMenuKeyboard())
+		return
+	}
+	if err := b.data.UpdateFruit(fruitID, price, f.MinWeightKg); err != nil {
+		log.Printf("UpdateFruit(%s): %v", fruitID, err)
+		b.api.SendMessage(chatID, "❌ خطا در ذخیره قیمت.", adminMenuKeyboard())
+		return
+	}
+	b.awaitingPriceFruit = ""
+	f.Price = price
+	b.api.SendMessage(chatID, fmt.Sprintf("✅ قیمت %s %s شد %s تومان.", f.Emoji, f.Name, FormatToman(price)), adminMenuKeyboard())
+	b.api.SendMessage(chatID, fruitAdminText(f), fruitAdminKeyboard(f))
 }
 
 func (b *Bot) sendFruitsToAdmin(chatID int64) {
@@ -1451,6 +1507,42 @@ func (b *Bot) adminFruitsCallback(chatID, messageID int64, data string) {
 			return
 		}
 		if err := b.data.UpdateFruit(id, f.Price, newMin); err != nil {
+			log.Printf("UpdateFruit(%s): %v", id, err)
+			return
+		}
+		showFruit(id)
+	case strings.HasPrefix(data, "admin:price:"):
+		parts := strings.Split(strings.TrimPrefix(data, "admin:price:"), ":")
+		if len(parts) != 2 {
+			return
+		}
+		id, action := parts[0], parts[1]
+		f, err := b.data.GetFruit(id)
+		if err != nil || f == nil {
+			log.Printf("GetFruit(%s): %v", id, err)
+			return
+		}
+		if action == "ask" {
+			b.awaitingPriceFruit = id
+			b.api.SendMessage(chatID, fmt.Sprintf("قیمت جدید %s %s را (تومان به ازای هر کیلو) به‌صورت عدد بفرستید. مثلاً ۳۲۵۰۰۰", f.Emoji, f.Name), nil)
+			return
+		}
+		newPrice := f.Price
+		if action == "inc" {
+			newPrice += priceStep
+		} else {
+			newPrice -= priceStep
+		}
+		if newPrice < minPrice {
+			newPrice = minPrice
+		}
+		if newPrice > maxPrice {
+			newPrice = maxPrice
+		}
+		if newPrice == f.Price {
+			return
+		}
+		if err := b.data.UpdateFruit(id, newPrice, f.MinWeightKg); err != nil {
 			log.Printf("UpdateFruit(%s): %v", id, err)
 			return
 		}
