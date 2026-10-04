@@ -1346,15 +1346,11 @@ func (b *Bot) sendWalletsToAdmin(chatID int64) {
 
 func fruitsListText(fruits []db.Fruit) string {
 	var sb strings.Builder
-	sb.WriteString("🍉 قیمت و حداقل سفارش میوه‌ها:
-
-")
+	sb.WriteString("🍉 قیمت و حداقل سفارش میوه‌ها:\n\n")
 	for _, f := range fruits {
-		sb.WriteString(fmt.Sprintf("%s %s — %s تومان/کیلو (حداقل %s کیلو)
-", f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg)))
+		sb.WriteString(fmt.Sprintf("%s %s — %s تومان/کیلو (حداقل %s کیلو)\n", f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg)))
 	}
-	sb.WriteString("
-برای تغییر «حداقل سفارش» روی میوه بزنید. قیمت و عکس و افزودن/حذف میوه از پنل وب انجام می‌شود.")
+	sb.WriteString("\nبرای تغییر «حداقل سفارش» روی میوه بزنید. قیمت و عکس و افزودن/حذف میوه از پنل وب انجام می‌شود.")
 	return sb.String()
 }
 
@@ -1373,11 +1369,7 @@ func fruitsListKeyboard(fruits []db.Fruit) *bale.InlineKeyboardMarkup {
 }
 
 func fruitAdminText(f *db.Fruit) string {
-	return fmt.Sprintf("%s %s
-قیمت: %s تومان/کیلو
-حداقل سفارش: %s کیلوگرم
-
-با دکمه‌های زیر حداقل سفارش را (هر بار ۰.۵ کیلو) تغییر دهید:",
+	return fmt.Sprintf("%s %s\nقیمت: %s تومان/کیلو\nحداقل سفارش: %s کیلوگرم\n\nبا دکمه‌های زیر حداقل سفارش را (هر بار ۰.۵ کیلو) تغییر دهید:",
 		f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg))
 }
 
