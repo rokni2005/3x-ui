@@ -3,7 +3,6 @@
 package admin
 
 import (
-	"crypto/subtle"
 	"html/template"
 	"log"
 	"net/http"
@@ -17,20 +16,24 @@ import (
 	"balebot/db"
 )
 
-// Server is the admin HTTP handler. It requires HTTP Basic Auth.
+// Server is the admin HTTP handler. It requires HTTP Basic Auth against the
+// admin_users table (see users.go).
 type Server struct {
-	data     *db.Store
-	bot      *bot.Bot
-	username string
-	password string
+	data *db.Store
+	bot  *bot.Bot
+	authz *authState
 }
 
-// New builds an admin server. username/password must both be non-empty;
-// the caller decides whether to start the server at all. bot is used to
-// message customers when the admin confirms or ships an order; it may be
-// nil in tests that don't exercise those actions.
+// New builds an admin server. username/password seed the very first admin
+// account when none exists yet (afterwards accounts live in the database and
+// are managed from the /users page); the caller decides whether to start the
+// server at all. bot is used to message customers when the admin confirms or
+// ships an order; it may be nil in tests that don't exercise those actions.
 func New(data *db.Store, b *bot.Bot, username, password string) *Server {
-	return &Server{data: data, bot: b, username: username, password: password}
+	if err := data.EnsureAdminUser(username, password); err != nil {
+		log.Printf("admin: seeding first admin user: %v", err)
+	}
+	return &Server{data: data, bot: b, authz: newAuthState()}
 }
 
 // Handler returns the configured http.Handler, ready to be served.
@@ -50,21 +53,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/wallets", s.auth(s.handleWallets))
 	mux.HandleFunc("/wallets/update", s.auth(s.handleUpdateWallet))
 	mux.HandleFunc("/wallets/zero", s.auth(s.handleZeroWallet))
+	mux.HandleFunc("/users", s.auth(s.handleUsers))
+	mux.HandleFunc("/users/add", s.auth(s.handleAddUser))
+	mux.HandleFunc("/users/update", s.auth(s.handleUpdateUser))
+	mux.HandleFunc("/users/delete", s.auth(s.handleDeleteUser))
 	return mux
-}
-
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		validUser := subtle.ConstantTimeCompare([]byte(user), []byte(s.username)) == 1
-		validPass := subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) == 1
-		if !ok || !validUser || !validPass {
-			w.Header().Set("WWW-Authenticate", `Basic realm="fruit bot admin"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +120,7 @@ var fruitsTemplate = template.Must(template.New("fruits").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a><a href="/users">کاربران</a></nav>
 	<h1>🍉 مدیریت قیمت، حداقل وزن و عکس میوه‌ها</h1>
 	{{if .Message}}<div class="msg {{.MessageClass}}">{{.Message}}</div>{{end}}
 
@@ -395,7 +388,7 @@ var ordersTemplate = template.Must(template.New("orders").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a><a href="/users">کاربران</a></nav>
 	<h1>📦 سفارش‌ها</h1>
 	<div class="range-tabs">
 		<a href="/orders?range=today" class="{{if eq .Range "today"}}active{{end}}">امروز</a>
@@ -627,7 +620,7 @@ var statsTemplate = template.Must(template.New("stats").Funcs(funcMap).Parse(`
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a><a href="/users">کاربران</a></nav>
 	<h1>📊 آمار سفارش‌ها</h1>
 	<div class="cards">
 		<div class="card"><div class="n">{{.TotalOrders}}</div><div class="l">کل سفارش‌ها</div></div>
@@ -685,7 +678,7 @@ var walletsTemplate = template.Must(template.New("wallets").Funcs(funcMap).Parse
 </style>
 </head>
 <body>
-	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a></nav>
+	<nav><a href="/fruits">میوه‌ها</a><a href="/orders">سفارش‌ها</a><a href="/stats">آمار</a><a href="/wallets">کیف‌پول</a><a href="/users">کاربران</a></nav>
 	<h1>👛 کیف‌پول مشتری‌ها (مبلغ باقی‌مانده بدهکاری)</h1>
 	{{if not .Customers}}
 		<div class="empty">هیچ مشتری‌ای در حال حاضر بدهی باقی‌مانده ندارد.</div>

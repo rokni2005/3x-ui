@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -596,6 +597,10 @@ func (b *Bot) handleCallback(cq bale.CallbackQuery) {
 		if err := b.api.EditMessageText(chatID, messageID, adminOrderText(*order), adminOrderKeyboard(*order)); err != nil {
 			log.Printf("EditMessageText (ship order #%d): %v", order.ID, err)
 		}
+
+	case chatID == b.cfg.AdminChatID && (data == "admin:fruits" || strings.HasPrefix(data, "admin:fruit:") || strings.HasPrefix(data, "admin:minw:")):
+		b.api.AnswerCallbackQuery(cq.ID, "", false)
+		b.adminFruitsCallback(chatID, messageID, data)
 
 	case chatID == b.cfg.AdminChatID && data == "restore:confirm":
 		b.api.AnswerCallbackQuery(cq.ID, "", false)
@@ -1339,6 +1344,54 @@ func (b *Bot) sendWalletsToAdmin(chatID int64) {
 	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
 }
 
+func fruitsListText(fruits []db.Fruit) string {
+	var sb strings.Builder
+	sb.WriteString("🍉 قیمت و حداقل سفارش میوه‌ها:
+
+")
+	for _, f := range fruits {
+		sb.WriteString(fmt.Sprintf("%s %s — %s تومان/کیلو (حداقل %s کیلو)
+", f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg)))
+	}
+	sb.WriteString("
+برای تغییر «حداقل سفارش» روی میوه بزنید. قیمت و عکس و افزودن/حذف میوه از پنل وب انجام می‌شود.")
+	return sb.String()
+}
+
+func fruitsListKeyboard(fruits []db.Fruit) *bale.InlineKeyboardMarkup {
+	var rows [][]bale.InlineKeyboardButton
+	for i := 0; i < len(fruits); i += 2 {
+		row := []bale.InlineKeyboardButton{
+			{Text: "✏️ " + fruits[i].Emoji + " " + fruits[i].Name, CallbackData: "admin:fruit:" + fruits[i].ID},
+		}
+		if i+1 < len(fruits) {
+			row = append(row, bale.InlineKeyboardButton{Text: "✏️ " + fruits[i+1].Emoji + " " + fruits[i+1].Name, CallbackData: "admin:fruit:" + fruits[i+1].ID})
+		}
+		rows = append(rows, row)
+	}
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func fruitAdminText(f *db.Fruit) string {
+	return fmt.Sprintf("%s %s
+قیمت: %s تومان/کیلو
+حداقل سفارش: %s کیلوگرم
+
+با دکمه‌های زیر حداقل سفارش را (هر بار ۰.۵ کیلو) تغییر دهید:",
+		f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg))
+}
+
+func fruitAdminKeyboard(f *db.Fruit) *bale.InlineKeyboardMarkup {
+	return &bale.InlineKeyboardMarkup{InlineKeyboard: [][]bale.InlineKeyboardButton{
+		{
+			{Text: "- کم کردن", CallbackData: "admin:minw:" + f.ID + ":dec"},
+			{Text: FormatWeight(f.MinWeightKg) + " کیلوگرم", CallbackData: "noop"},
+			{Text: "+ زیاد کردن", CallbackData: "admin:minw:" + f.ID + ":inc"},
+		},
+		{{Text: "🔙 بازگشت به لیست میوه‌ها", CallbackData: "admin:fruits"}},
+	}}
+}
+
 func (b *Bot) sendFruitsToAdmin(chatID int64) {
 	fruits, err := b.data.ListFruits()
 	if err != nil {
@@ -1346,13 +1399,71 @@ func (b *Bot) sendFruitsToAdmin(chatID int64) {
 		b.api.SendMessage(chatID, "خطا در خواندن لیست میوه‌ها.", adminMenuKeyboard())
 		return
 	}
-	var sb strings.Builder
-	sb.WriteString("🍉 قیمت میوه‌ها:\n\n")
-	for _, f := range fruits {
-		sb.WriteString(fmt.Sprintf("%s %s — %s تومان/کیلو (حداقل %s کیلو)\n", f.Emoji, f.Name, FormatToman(f.Price), FormatWeight(f.MinWeightKg)))
+	b.api.SendMessage(chatID, fruitsListText(fruits), fruitsListKeyboard(fruits))
+}
+
+// adminFruitsCallback handles the admin's inline buttons for browsing
+// fruits and adjusting each one's minimum order weight from the chat.
+func (b *Bot) adminFruitsCallback(chatID, messageID int64, data string) {
+	showList := func() {
+		fruits, err := b.data.ListFruits()
+		if err != nil {
+			log.Printf("ListFruits: %v", err)
+			return
+		}
+		if err := b.api.EditMessageText(chatID, messageID, fruitsListText(fruits), fruitsListKeyboard(fruits)); err != nil {
+			log.Printf("EditMessageText (fruits list): %v", err)
+		}
 	}
-	sb.WriteString("\nبرای ویرایش قیمت، عکس یا افزودن/حذف میوه، از پنل وب ادمین استفاده کنید.")
-	b.api.SendMessage(chatID, sb.String(), adminMenuKeyboard())
+	showFruit := func(id string) {
+		f, err := b.data.GetFruit(id)
+		if err != nil || f == nil {
+			log.Printf("GetFruit(%s): %v", id, err)
+			return
+		}
+		if err := b.api.EditMessageText(chatID, messageID, fruitAdminText(f), fruitAdminKeyboard(f)); err != nil {
+			log.Printf("EditMessageText (fruit %s): %v", id, err)
+		}
+	}
+
+	switch {
+	case data == "admin:fruits":
+		showList()
+	case strings.HasPrefix(data, "admin:fruit:"):
+		showFruit(strings.TrimPrefix(data, "admin:fruit:"))
+	case strings.HasPrefix(data, "admin:minw:"):
+		parts := strings.Split(strings.TrimPrefix(data, "admin:minw:"), ":")
+		if len(parts) != 2 {
+			return
+		}
+		id, dir := parts[0], parts[1]
+		f, err := b.data.GetFruit(id)
+		if err != nil || f == nil {
+			log.Printf("GetFruit(%s): %v", id, err)
+			return
+		}
+		newMin := f.MinWeightKg
+		if dir == "inc" {
+			newMin += weightStepKg
+		} else {
+			newMin -= weightStepKg
+		}
+		if newMin < weightStepKg {
+			newMin = weightStepKg
+		}
+		if newMin > 50 {
+			newMin = 50
+		}
+		newMin = math.Round(newMin*10) / 10
+		if newMin == f.MinWeightKg {
+			return
+		}
+		if err := b.data.UpdateFruit(id, f.Price, newMin); err != nil {
+			log.Printf("UpdateFruit(%s): %v", id, err)
+			return
+		}
+		showFruit(id)
+	}
 }
 
 // sendDatabaseBackup takes a consistent snapshot of the live SQLite
