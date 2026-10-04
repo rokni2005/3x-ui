@@ -1205,6 +1205,14 @@ func adminMenuKeyboard() *bale.ReplyKeyboardMarkup {
 // the admin to check recent orders from inside the bot chat itself.
 
 func (b *Bot) handleAdminMessage(chatID int64, text string) {
+	if id := b.awaitingPriceFruit; id != "" {
+		if !isAdminMenuText(text) {
+			b.handleAdminPriceInput(chatID, id, text)
+			return
+		}
+		b.awaitingPriceFruit = "" // admin moved on to a menu command: cancel the pending price entry
+	}
+
 	if text != adminRestoreButton && text != "/restore" {
 		// Any other admin message means they didn't follow through with
 		// the upload — drop the pending-file expectation so a stray file
