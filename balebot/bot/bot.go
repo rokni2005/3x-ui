@@ -120,6 +120,10 @@ type Config struct {
 	// admin-triggered restore flow to stage an upload next to it (for an
 	// atomic same-filesystem rename) and to hand off to db.Store.Restore.
 	DBPath string
+
+	// BackupHour is the Tehran-time hour (0-23) at which the bot sends the
+	// admin an automatic database backup every night; negative disables it.
+	BackupHour int
 }
 
 // Bot wires together the Bale API client, the persistent catalog/orders
@@ -153,6 +157,8 @@ func New(api *bale.Client, data *db.Store, cfg Config) *Bot {
 
 // Run starts the long-polling loop. It blocks until an unrecoverable error occurs.
 func (b *Bot) Run() error {
+	go b.nightlyBackupLoop()
+
 	var offset int64
 	for {
 		updates, err := b.api.GetUpdates(offset)
@@ -1563,6 +1569,35 @@ func (b *Bot) adminFruitsCallback(chatID, messageID int64, data string) {
 // requests) and sends it to the admin as a document, so a backup is always
 // just one tap away instead of requiring server/SSH access.
 func (b *Bot) sendDatabaseBackup(chatID int64) {
+	b.sendBackupDocument(chatID, "💾 بکاپ دیتابیس")
+}
+
+// nightlyBackupLoop sends the admin a fresh database backup every night at
+// cfg.BackupHour (Tehran time), so there is always a recent off-server copy
+// even if nobody remembers to tap the backup button.
+func (b *Bot) nightlyBackupLoop() {
+	if b.cfg.AdminChatID == 0 || b.cfg.BackupHour < 0 {
+		return
+	}
+	loc, err := time.LoadLocation("Asia/Tehran")
+	if err != nil {
+		loc = time.FixedZone("Asia/Tehran", 3*3600+1800)
+	}
+	for {
+		now := time.Now().In(loc)
+		next := time.Date(now.Year(), now.Month(), now.Day(), b.cfg.BackupHour, 0, 0, 0, loc)
+		if !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+		log.Printf("next nightly backup at %s", next.Format("2006-01-02 15:04 MST"))
+		time.Sleep(time.Until(next))
+		b.sendBackupDocument(b.cfg.AdminChatID, "🌙 بکاپ شبانه")
+	}
+}
+
+// sendBackupDocument snapshots the database and sends it as a document with
+// the given caption prefix; on failure the admin gets an error message.
+func (b *Bot) sendBackupDocument(chatID int64, captionPrefix string) {
 	backupPath := filepath.Join(os.TempDir(), fmt.Sprintf("balebot-backup-%s.db", time.Now().Format("20060102-150405")))
 	if err := b.data.Backup(backupPath); err != nil {
 		log.Printf("Backup: %v", err)
@@ -1579,7 +1614,7 @@ func (b *Bot) sendDatabaseBackup(chatID int64) {
 	}
 	defer f.Close()
 
-	caption := fmt.Sprintf("💾 بکاپ دیتابیس — %s", time.Now().Format("2006-01-02 15:04"))
+	caption := fmt.Sprintf("%s — %s", captionPrefix, time.Now().Format("2006-01-02 15:04"))
 	if _, err := b.api.SendDocument(chatID, filepath.Base(backupPath), f, caption); err != nil {
 		log.Printf("SendDocument (backup): %v", err)
 		b.api.SendMessage(chatID, "❌ خطا در ارسال فایل بکاپ.", adminMenuKeyboard())

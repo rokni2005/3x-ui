@@ -39,12 +39,20 @@ func main() {
 		PaymentCurrency:         getEnv("PAYMENT_CURRENCY", "IRR"),
 		PaymentAmountMultiplier: 10,
 		DBPath:                  dbPath,
+		BackupHour:              3,
 	}
 	if v := os.Getenv("DEPOSIT_AMOUNT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.DepositAmount = n
 		} else {
 			log.Printf("ignoring invalid DEPOSIT_AMOUNT %q: %v", v, err)
+		}
+	}
+	if v := os.Getenv("NIGHTLY_BACKUP_HOUR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n <= 23 {
+			cfg.BackupHour = n
+		} else {
+			log.Printf("ignoring invalid NIGHTLY_BACKUP_HOUR %q (want 0-23, or -1 to disable)", v)
 		}
 	}
 	if v := os.Getenv("ADMIN_CHAT_ID"); v != "" {
