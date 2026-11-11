@@ -428,12 +428,12 @@ class Bot(AdminMixin):
                  f"ایستگاه: {st.name if st else '-'}", ""]
         for q in form:
             lines.append(f"▪️ {q.get('label', q['key'])}: {data['answers'].get(q['key'], '-')}")
-        dest = self.cfg.referral_chat_id or (self.cfg.admin_ids[0] if self.cfg.admin_ids else None)
-        if dest:
+        dests = self.cfg.referral_chat_ids or self.cfg.admin_ids[:1]
+        for dest in dests:  # مسئول اصلی و نفر(ات) دوم؛ خطای یکی مانع ارسال به بقیه نشود
             try:
                 self.client.send_message(dest, "\n".join(lines))
             except Exception:
-                log.exception("referral delivery failed")
+                log.exception("referral delivery failed to %s", dest)
         self.say(chat_id, self.m("refer_done"), MENU)
 
     # ───────────── ابزار ادمین ─────────────

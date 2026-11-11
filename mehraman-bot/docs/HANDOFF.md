@@ -92,7 +92,12 @@ ROUTER=claude@188.213.199.120 PORT=47291 KEY=~/.ssh/<key> bash deploy/routeros/d
 - محتوای پشتیبان واقعی و کاربرگ‌ها اضافه نشده‌اند.
 - شماره‌های اضطراری `safety.yaml` باید تطبیق داده شود.
 - تست زنده با بله و مدل انجام نشده؛ منتظر توکن تازه و کلید API است.
-- **وضعیت روی B (۲۰۲۶-۱۱-۱۱):** این‌ها اعمال شده‌اند: veth، mount، mangle، توکن جدید بله (getMe تأیید شد: @mehremanbot)، ایمیج و کانتینر `mehraman-bot`.
+- **وضعیت فعلی (۲۰۲۶-۱۱-۱۱، ۱۹:۴۵):** بازو روی B **روشن** است (`start-on-boot=yes`، `restart-policy=on-failure`).
+  - مدل: `gemini` / `gemini-3.8-flash`؛ مدل 2.5-flash برای کاربران جدید بسته است. کلید از NL3 کار می‌کند ولی از IP ایران 403 می‌گیرد.
+  - `ADMIN_IDS=186879241(@admin_mehreman),279156483(@nargesnemati82),1183285151(@counseling_az)`.
+  - `REFERRAL_CHAT_ID=186879241,279156483`: فرم ارجاع برای همه‌ی این شناسه‌ها فرستاده می‌شود و اولی مسئول اصلی است.
+  - پوشه‌ی knowledge هنوز خالی است، پس پرسش‌ها فعلاً «خارج از دامنه» می‌گیرند.
+- **سابقه‌ی استقرار (۲۰۲۶-۱۱-۱۱):** این‌ها اعمال شده‌اند: veth، mount، mangle، توکن جدید بله (getMe تأیید شد: @mehremanbot)، ایمیج و کانتینر `mehraman-bot`.
   - تست دود موفق بود: کتابخانه‌ها بارگذاری شدند، محتوا در `/mehraman-state` کپی شد، و بازو با پیام «LLM_API_KEY تنظیم نشده» خارج شد.
   - کانتینر فعلاً با `start-on-boot=no` و `restart-policy=no` خاموش است و منتظر `LLM_PROVIDER`/`LLM_MODEL`/`LLM_API_KEY` و `ADMIN_IDS`/`REFERRAL_CHAT_ID` است.
   - بعد از وارد کردن آن‌ها: `/container set mehraman-bot start-on-boot=yes restart-policy=on-failure` و سپس start.

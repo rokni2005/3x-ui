@@ -53,7 +53,7 @@ def env(tmp_path):
     kn = tmp_path / "knowledge"
     shutil.copytree(ROOT / "knowledge", kn)
     (kn / "listen.md").write_text((ROOT / "knowledge/_example.md").read_text(encoding="utf-8"), encoding="utf-8")
-    cfg = Config(bale_token="t", admin_ids=[1], referral_chat_id=999, data_dir=tmp_path / "d",
+    cfg = Config(bale_token="t", admin_ids=[1], referral_chat_ids=[999], data_dir=tmp_path / "d",
                  content_dir=content, knowledge_dir=kn, min_retrieval_score=0.5, daily_question_limit=3)
     client, llm = FakeClient(), FakeLLM()
     bot = Bot(cfg, client, DB(":memory:"), Content(content), KnowledgeBase(kn), llm)

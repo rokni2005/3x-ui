@@ -37,7 +37,11 @@ class Config:
     llm_base_url: str = ""
     llm_proxy: str = ""
     admin_ids: list[int] = field(default_factory=list)
-    referral_chat_id: int | None = None
+    referral_chat_ids: list[int] = field(default_factory=list)  # REFERRAL_CHAT_ID با کاما: اول مسئول اصلی
+
+    @property
+    def referral_chat_id(self) -> int | None:  # سازگاری با کد قدیمی
+        return self.referral_chat_ids[0] if self.referral_chat_ids else None
     timezone: str = "Asia/Tehran"
     daily_question_limit: int = 30
     min_retrieval_score: float = 1.2
@@ -59,7 +63,7 @@ class Config:
             llm_base_url=g("LLM_BASE_URL", "").strip().rstrip("/"),
             llm_proxy=g("LLM_PROXY", "").strip(),
             admin_ids=_ids(g("ADMIN_IDS", "")),
-            referral_chat_id=int(ref) if ref.lstrip("-").isdigit() else None,
+            referral_chat_ids=_ids(ref),
             timezone=g("TIMEZONE", "Asia/Tehran").strip(),
             daily_question_limit=int(g("DAILY_QUESTION_LIMIT", "30")),
             min_retrieval_score=float(g("MIN_RETRIEVAL_SCORE", "1.2")),
