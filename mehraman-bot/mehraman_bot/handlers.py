@@ -353,7 +353,8 @@ class Bot(AdminMixin):
         try:
             out = self.llm.generate(build_system_prompt(self.content.persona, st, user["name"]),
                                     [Msg("user", prompt)], 600)
-        except LLMError:
+        except LLMError as e:
+            log.warning("LLM failed (practice): %s", e)  # مثلاً 429 = سهمیه‌ی مدل تمام شده
             return self.m("llm_error")
         return "📝 تمرین پیشنهادی امروز\n\n" + out.replace(REFER_MARK, "").strip()
 
@@ -413,8 +414,8 @@ class Bot(AdminMixin):
         history.append(Msg("user", build_user_prompt(text, [] if smalltalk else hits)))
         try:
             out = self.llm.generate(build_system_prompt(self.content.persona, st, u["name"]), history, 700)
-        except LLMError:
-            log.exception("LLM failed")
+        except LLMError as e:
+            log.warning("LLM failed (question): %s", e)  # مثلاً 429 = سهمیه‌ی مدل تمام شده
             return self.say(chat_id, self.m("llm_error"), MENU)
         need_refer = REFER_MARK in out or sres.level == "refer"
         out = out.replace(REFER_MARK, "").strip() or self.m("error")

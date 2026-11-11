@@ -111,7 +111,7 @@ ROUTER=<user>@<ROUTER> PORT=<PORT> KEY=~/.ssh/<key> bash deploy/routeros/deploy-
 - تست زنده با بله و مدل انجام نشده؛ منتظر توکن تازه و کلید API است.
 - **وضعیت فعلی (۲۰۲۶-۱۱-۱۱، ۱۹:۴۵):** بازو روی روتر ایران **روشن** است (`start-on-boot=yes`، `restart-policy=on-failure`).
   - مدل: `gemini` / `gemini-3.1-flash-lite` (3.8-flash در سهمیه‌ی رایگان نیست: 429)؛ مدل 2.5-flash برای کاربران جدید بسته است. کلید از سرور خارج کار می‌کند ولی از IP ایران 403 می‌گیرد.
-  - `ADMIN_IDS=186879241(@admin_mehreman),279156483(@nargesnemati82),1183285151(@counseling_az)`.
+  - `ADMIN_IDS=186879241(@admin_mehreman),279156483(@nargesnemati82),1183285151(@counseling_az),1976614497(@r313ro)`.
   - `REFERRAL_CHAT_ID=186879241,279156483`: فرم ارجاع برای همه‌ی این شناسه‌ها فرستاده می‌شود و اولی مسئول اصلی است.
   - پوشه‌ی knowledge هنوز خالی است، پس پرسش‌ها فعلاً «خارج از دامنه» می‌گیرند.
 - **سابقه‌ی استقرار (۲۰۲۶-۱۱-۱۱):** این‌ها اعمال شده‌اند: veth، mount، mangle، توکن جدید بله (getMe تأیید شد: @mehremanbot)، ایمیج و کانتینر `mehraman-bot`.

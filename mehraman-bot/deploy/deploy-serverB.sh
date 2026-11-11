@@ -21,7 +21,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   read -rsp "توکن بازوی بله: " T; echo
   read -rp  "ارائه‌دهنده مدل (anthropic/gemini/openai) [gemini]: " P; P="${P:-gemini}"
-  read -rp  "نام مدل [gemini-2.5-flash]: " M; M="${M:-gemini-2.5-flash}"
+  read -rp  "نام مدل [gemini-3.1-flash-lite]: " M; M="${M:-gemini-3.1-flash-lite}"
   read -rsp "کلید API مدل: " K; echo
   read -rp  "شناسه عددی ادمین(ها)، با کاما: " A
   read -rp  "شناسه عددی مسئول ارجاع به مشاور: " R

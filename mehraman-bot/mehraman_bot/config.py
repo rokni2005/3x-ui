@@ -33,7 +33,7 @@ class Config:
     bale_api_base: str = "https://tapi.bale.ai"
     llm_provider: str = "gemini"
     llm_api_key: str = ""
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.1-flash-lite"
     llm_base_url: str = ""
     llm_proxy: str = ""
     admin_ids: list[int] = field(default_factory=list)
@@ -59,7 +59,7 @@ class Config:
             bale_api_base=g("BALE_API_BASE", "https://tapi.bale.ai").rstrip("/"),
             llm_provider=g("LLM_PROVIDER", "gemini").strip().lower(),
             llm_api_key=g("LLM_API_KEY", "").strip(),
-            llm_model=g("LLM_MODEL", "gemini-2.5-flash").strip(),
+            llm_model=g("LLM_MODEL", "gemini-3.1-flash-lite").strip(),
             llm_base_url=g("LLM_BASE_URL", "").strip().rstrip("/"),
             llm_proxy=g("LLM_PROXY", "").strip(),
             admin_ids=_ids(g("ADMIN_IDS", "")),
