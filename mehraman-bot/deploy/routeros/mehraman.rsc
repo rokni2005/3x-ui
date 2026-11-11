@@ -15,8 +15,13 @@
 /container envs add list=mehraman-env key=DAILY_QUESTION_LIMIT value="30"
 /container envs add list=mehraman-env key=MIN_RETRIEVAL_SCORE value="1.2"
 
-# مسیر: بله داخل ایران است و مستقیم می‌رود؛ API مدل (Gemini/Anthropic/OpenAI) آی‌پی ایران را رد می‌کند،
-# پس ترافیک خارجیِ کانتینر از جدول EXT-DE (خروجی سرور خارج (هلند) از تونل، با پشتیبان‌های خودکار) می‌رود.
-/ip firewall mangle add chain=prerouting action=mark-routing new-routing-mark=EXT-DE passthrough=no src-address=172.31.0.23 dst-address-list=!IranSupernets comment="Mehraman bot: model API abroad via foreign exit"
+# مسیر: بله داخل ایران است و باید **مستقیم** برود (اگر از خارج برود پاسخ‌ها چند دقیقه دیر می‌رسد)؛
+# API مدل (Gemini/Anthropic/OpenAI) آی‌پی ایران را رد می‌کند، پس بقیه‌ی ترافیک خارجیِ کانتینر از جدول EXT-DE
+# (خروجی سرور خارج، با پشتیبان‌های خودکار) می‌رود.
+# ⚠️ ترتیب مهم است: این دو قانون باید **بالاتر** از هر قانون عمومی‌ای باشند که ترافیک کانتینرها را جای دیگر
+# می‌فرستد (روی روتر فعلی: قانون با comment «containers -> abroad via A»). اگر چنین قانونی نیست، place-before را بردارید.
+/ip firewall address-list add list=Mehraman-Bale address=tapi.bale.ai comment="Mehraman bot: Bale API (direct)"
+/ip firewall mangle add chain=prerouting action=accept src-address=172.31.0.23 dst-address-list=Mehraman-Bale comment="Mehraman bot: Bale direct (Iran)" place-before=[find comment~"containers -> abroad via A"]
+/ip firewall mangle add chain=prerouting action=mark-routing new-routing-mark=EXT-DE passthrough=no src-address=172.31.0.23 dst-address-list=!IranSupernets comment="Mehraman bot: model API abroad via foreign exit" place-before=[find comment~"containers -> abroad via A"]
 
 # خود کانتینر در container.rsc است (برای ارتقا جدا اجرا می‌شود)
