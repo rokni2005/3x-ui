@@ -12,6 +12,7 @@ import yaml
 from . import safety
 from .bale import BaleClient, inline_keyboard, reply_keyboard
 from .config import Config
+from .admin_panel import BTN_ADMIN, AdminMixin
 from .content import Content, Station, validate_data
 from .db import DB
 from .ingest import to_markdown
@@ -33,11 +34,13 @@ REFER_MARK = "[[REFER]]"
 OBSTACLE_LABELS = {"time": "وقت نشد", "unclear": "نفهمیدم چه کنم", "partner": "همسرم همراه نبود",
                    "forgot": "یادم رفت", "other": "دلیل دیگر"}
 OBSTACLES = {"time": "وقت", "unclear": "ابهام در تمرین", "partner": "همراهی همسر", "forgot": "فراموشی", "other": "سایر"}
+ADMIN_MENU = reply_keyboard([[BTN_PRACTICE, BTN_MAP], [BTN_ASK, BTN_COUNSELOR],
+                             [BTN_REMINDER, BTN_ABOUT], [BTN_ADMIN]])
 ADMIN_CMDS = {"/stats", "/reload", "/sources", "/delknowledge", "/adminhelp"}
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
-class Bot:
+class Bot(AdminMixin):
     def __init__(self, cfg: Config, client: BaleClient, db: DB, content: Content,
                  kb: KnowledgeBase, llm: LLM):
         self.cfg, self.client, self.db, self.content, self.kb, self.llm = cfg, client, db, content, kb, llm
@@ -45,6 +48,8 @@ class Bot:
 
     # ───────────── کمکی‌ها ─────────────
     def say(self, chat_id: int, text: str, markup: dict | None = None) -> None:
+        if markup is MENU and self.is_admin(chat_id):
+            markup = ADMIN_MENU
         self.client.send_message(chat_id, text, markup)
 
     def is_admin(self, chat_id: int) -> bool:
@@ -109,12 +114,16 @@ class Bot:
         by_btn = {BTN_PRACTICE: self.cmd_practice, BTN_MAP: self.cmd_profile, BTN_COUNSELOR: self.cmd_counselor,
                   BTN_REMINDER: lambda c: self.cmd_reminder(c, ""), BTN_ABOUT: self.cmd_about,
                   BTN_ASK: lambda c: self.say(c, self.m("ask_prompt"), MENU)}
+        if text == BTN_ADMIN and self.is_admin(chat_id):
+            return self.admin_home(chat_id)
         if text in by_btn:
             self.db.set_state(chat_id)
             return by_btn[text](chat_id)
         if cmd in routes:
             return routes[cmd](chat_id)
         state, data = self.db.state(chat_id)
+        if state.startswith("adm_") and self.admin_state_text(chat_id, text, state, data):
+            return
         if state == "refer":
             return self._referral_answer(chat_id, text, data)
         if state == "reminder_custom":
@@ -156,6 +165,8 @@ class Bot:
             return self.set_station(chat_id, u["station_order"] + 1)
         if kind == "refer":
             return self.cmd_counselor(chat_id) if val == "start" else self._referral_begin(chat_id)
+        if kind == "adm":
+            return self.admin_callback(chat_id, val)
         if kind == "profile":
             return self.cmd_profile(chat_id)
         if kind == "practice":
@@ -469,6 +480,11 @@ class Bot:
         doc, caption = msg["document"], (msg.get("caption") or "").strip()
         name = re.sub(r"[^\w.\-]+", "_", doc.get("file_name") or "file", flags=re.UNICODE)
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        state = self.db.state(chat_id)[0]
+        if not caption and state == "adm_k":
+            caption = "/addknowledge"
+        elif not caption and state == "adm_c":
+            caption = "/addcontent"
         if not caption.startswith(("/addknowledge", "/addcontent")):
             return self.say(chat_id, "برای افزودن، فایل را با کپشن /addknowledge (محتوای پشتیبان: docx/md/txt) "
                             "یا /addcontent (دوره/کاربرگ: yaml) بفرستید.")

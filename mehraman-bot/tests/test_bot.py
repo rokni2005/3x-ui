@@ -259,3 +259,33 @@ def test_non_admin_upload_ignored(env):
     onboard(bot)
     bot.handle_update(msg(5, "", caption="/addknowledge", document={"file_id": "x", "file_name": "t.md"}))
     assert not (bot.cfg.knowledge_dir / "t.md").exists()
+
+
+def test_admin_panel_worksheet_wizard_and_knowledge(env):
+    bot, client, llm = env
+    onboard(bot, chat=1)
+    bot.handle_update(msg(1, "🛠 پنل مدیریت"))
+    assert "adm:addw" in str(client.last(1)[2])
+    bot.handle_update(cb(1, "adm:addw"))
+    bot.handle_update(cb(1, "adm:ws:5"))
+    bot.handle_update(msg(1, "بازتاب یک جمله"))
+    bot.handle_update(msg(1, "1. یک جمله از همسر بشنوید\n2. با زبان خودتان بازگو کنید"))
+    bot.handle_update(cb(1, "adm:wsave"))
+    ws = bot.content.worksheets["s05-ws1"]
+    assert ws.title == "بازتاب یک جمله" and len(ws.steps) == 2
+    # افزودن متن به‌عنوان محتوای پشتیبان
+    bot.handle_update(cb(1, "adm:addk"))
+    bot.handle_update(msg(1, "حریم خصوصی\nاحترام به حریم همسر مهم است."))
+    assert any("حریم" in v["title"] for v in bot.kb.sources.values())
+    # حذف با دکمه
+    bot.handle_update(cb(1, "adm:del:0"))
+    bot.handle_update(cb(1, "adm:delok:0"))
+    assert "حذف شد" in client.last(1)[1]
+
+
+def test_non_admin_cannot_use_panel(env):
+    bot, client, _ = env
+    onboard(bot)
+    bot.handle_update(cb(5, "adm:addk"))
+    bot.handle_update(msg(5, "🛠 پنل مدیریت"))
+    assert bot.db.state(5)[0] == ""

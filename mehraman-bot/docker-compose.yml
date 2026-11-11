@@ -1,11 +1,15 @@
 services:
   mehraman-bot:
     build: .
+    container_name: mehraman-bot
     restart: unless-stopped
     env_file: .env
     environment:
       DATA_DIR: /app/data
     volumes:
-      - ./data:/app/data
-      - ./knowledge:/app/knowledge
-      - ./content:/app/content
+      - ./data:/app/data          # پایگاه داده‌ی کاربران (ماندگار)
+      - ./knowledge:/app/knowledge # محتوای پشتیبان
+      - ./content:/app/content     # دوره‌ها، کاربرگ‌ها، لحن
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
