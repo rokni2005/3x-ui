@@ -45,7 +45,7 @@
   - `data/mehraman.db`: پایگاه داده‌ی کاربران. **مهم‌ترین چیز برای بکاپ همین است.**
   - `content/` و `knowledge/`: محتوای فعلی بازو، همراه هر چه ادمین‌ها از پنل اضافه کرده‌اند.
 - **تنظیمات و اسرار:** در `/container envs` روتر، لیست `mehraman-env`، ذخیره شده‌اند.
-  - `BALE_BOT_TOKEN`, `LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.8-flash`, `LLM_API_KEY`
+  - `BALE_BOT_TOKEN`, `LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.1-flash-lite`, `LLM_API_KEY`
   - `ADMIN_IDS` (شناسه‌های عددی ادمین‌ها با کاما)
   - `REFERRAL_CHAT_ID` (گیرنده‌های فرم ارجاع با کاما؛ اولی مسئول اصلی است)
   - `TIMEZONE`, `DAILY_QUESTION_LIMIT`, `MIN_RETRIEVAL_SCORE`
@@ -158,7 +158,7 @@ ssh -p <PORT> -i ~/.ssh/<router-key> <user>@<ROUTER> '/import file-name=mehraman
 docker load -i container/mehraman-bot.tar          # ایمیج: mehraman-bot:latest
 docker run -d --name mehraman-bot --restart unless-stopped \
   -v /opt/mehraman-state:/srv/mehraman \
-  -e BALE_BOT_TOKEN=... -e LLM_PROVIDER=gemini -e LLM_MODEL=gemini-3.8-flash -e LLM_API_KEY=... \
+  -e BALE_BOT_TOKEN=... -e LLM_PROVIDER=gemini -e LLM_MODEL=gemini-3.1-flash-lite -e LLM_API_KEY=... \
   -e ADMIN_IDS=... -e REFERRAL_CHAT_ID=... mehraman-bot:latest
 ```
 یا از سورس: `docker compose up -d --build`. فایل `.env` از روی `.env.example` ساخته می‌شود.
@@ -208,7 +208,7 @@ docker run -d --name mehraman-bot --restart unless-stopped \
 
 - **Gemini:**
   - کلید Gemini فقط از آی‌پی غیرایرانی کار می‌کند؛ از ایران خطای 403 می‌دهد.
-  - مدل `gemini-2.5-flash` برای کاربران جدید بسته است و از `gemini-3.8-flash` استفاده می‌شود. اگر گوگل مدل را عوض کرد، فقط `LLM_MODEL` را در envها عوض کنید.
+  - مدل فعلی `gemini-3.1-flash-lite` است: سریع (حدود ۱ ثانیه) و در سهمیه‌ی رایگان. مدل‌های «فکرکننده» مثل `gemini-3.8-flash` در سهمیه‌ی رایگان این کلید نیستند و خطای 429 می‌دهند. اگر بازو مدام «الان نتوانستم پاسخ بدهم» گفت، اول سهمیه و مدل را در aistudio.google.com بررسی کنید. اگر گوگل مدل را عوض کرد، فقط `LLM_MODEL` را در envها عوض کنید.
 - **اگر Gemini در دسترس نباشد:**
   - منو، کاربرگ‌ها، ارسال روزانه، ارسال پیام ادمین و فرم ارجاع کار می‌کنند.
   - فقط پاسخ پرسش‌های آزاد پیام «الان نتوانستم پاسخ بدهم» می‌دهد.
