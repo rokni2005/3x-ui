@@ -53,13 +53,13 @@
 - **میکروتیک (محل استقرار اصلی):** پوشه‌ی `deploy/routeros/` (بخش بعد).
 
 ## استقرار روی میکروتیک (RouterOS container)
-**محل:** سرور B (CHR، x86_64/amd64، RouterOS 7.24.4). دلیل انتخاب: سرور ایران است (بله داخلی است) و نقش «روتر سرویس‌ها» دارد (ربات‌ها/دیتابیس)، نه نقطه‌ی اتصال کاربران VPN، پس کمتر در معرض فیلتر است. بررسی ۱۴۰۵/۰۸/۲۰: پکیج container نصب، device-mode container=yes، ۲۱٫۶ گیگ دیسک آزاد، ~۴۷۰ مگ RAM آزاد از ۲ گیگ، دسترسی به `tapi.bale.ai` برقرار.
+**محل:** روتر میکروتیک ایران (CHR، x86_64/amd64، RouterOS 7.24.4). دلیل انتخاب: سرور ایران است (بله داخلی است) و نقش «روتر سرویس‌ها» دارد (ربات‌ها/دیتابیس)، نه نقطه‌ی اتصال کاربران VPN، پس کمتر در معرض فیلتر است. بررسی ۱۴۰۵/۰۸/۲۰: پکیج container نصب، device-mode container=yes، ۲۱٫۶ گیگ دیسک آزاد، ~۴۷۰ مگ RAM آزاد از ۲ گیگ، دسترسی به `tapi.bale.ai` برقرار.
 
 | فایل | نقش |
 |---|---|
 | `deploy/routeros/build_image_tar.py` | ساخت ایمیج **بدون Docker**: `python:3.12-slim` (Docker Hub) + یک لایه (چرخ‌های httpx/PyYAML برای cp312 + کد + نسخه‌ی اولیه‌ی محتوا در `/app/_seed`) ← tar با قالب `docker save`. `--arch arm64` برای روترهای ARM. |
 | `deploy/routeros/entrypoint.sh` | نقطه‌ی ورود کانتینر: پوشه‌ی ماندگار `/srv/mehraman` را می‌سازد، بار اول `content/` و `knowledge/` را از `_seed` کپی می‌کند، `DATA_DIR/CONTENT_DIR/KNOWLEDGE_DIR` را تنظیم و بازو را اجرا می‌کند. |
-| `deploy/routeros/mehraman.rsc` | معادل compose (یک‌بار): veth `veth-mehraman` با IP ‏`172.31.0.23` روی `BR-Container`، mount ماندگار `/mehraman-state` ← `/srv/mehraman`، envهای غیرمحرمانه، و mangle که ترافیک خارجی کانتینر را به جدول `EXT-DE` (خروجی هلند NL3) می‌فرستد. |
+| `deploy/routeros/mehraman.rsc` | معادل compose (یک‌بار): veth `veth-mehraman` با IP ‏`172.31.0.23` روی `BR-Container`، mount ماندگار `/mehraman-state` ← `/srv/mehraman`، envهای غیرمحرمانه، و mangle که ترافیک خارجی کانتینر را به جدول `EXT-DE` (خروجی سرور خارج (هلند)) می‌فرستد. |
 | `deploy/routeros/container.rsc` | ساخت/بازسازی کانتینر از `images/mehraman-bot.tar` با `start-on-boot=yes` و `restart-policy=on-failure`؛ پوشه‌ی ماندگار دست نمی‌خورد. |
 | `deploy/routeros/deploy-routeros.sh` | معادل `deploy-serverB.sh`، از کامپیوتر ادمین با SSH: `install` / `update` / `secrets` / `check`. |
 
@@ -68,11 +68,11 @@
 - کانتینر با root اجرا می‌شود چون پوشه‌های mount روتر مال root هستند (در Docker کاربر `bot` بود). از شبکه‌ی بیرون فقط اتصال خروجی دارد؛ هیچ پورتی باز نمی‌شود (long‑polling).
 - لاگ stdout در لاگ روتر است: `/log print where topics~"container"`. توکن در لاگ نمی‌آید (لاگ httpx خاموش است).
 
-**مسیر شبکه:** بله (IP ایران) مستقیم از B. API مدل‌ها IP ایران را رد می‌کنند، پس هر مقصد خارج از `IranSupernets` از جدول `EXT-DE` می‌رود: اول GRE به NL3 (هلند/ایرلند ‎83.141.72.255، تأییدشده برای Gemini)، با پشتیبان خودکار. `LLM_PROXY` لازم نیست.
+**مسیر شبکه:** بله (IP ایران) مستقیم از روتر ایران. API مدل‌ها IP ایران را رد می‌کنند، پس هر مقصد خارج از `IranSupernets` از جدول `EXT-DE` می‌رود: اول تونل به سرور خارج (هلند، تأییدشده برای Gemini)، با پشتیبان خودکار. `LLM_PROXY` لازم نیست.
 
 **نصب اول:**
 ```bash
-ROUTER=claude@188.213.199.120 PORT=47291 KEY=~/.ssh/<key> bash deploy/routeros/deploy-routeros.sh install
+ROUTER=<user>@<ROUTER> PORT=<PORT> KEY=~/.ssh/<key> bash deploy/routeros/deploy-routeros.sh install
 ```
 **ارتقای کد:** همان دستور با `update`. ایمیج نو ساخته و آپلود می‌شود، کانتینر از نو ساخته می‌شود. دیتابیس و محتوای افزوده‌شده در `/mehraman-state` می‌مانند.
 **تعویض توکن/کلید:** با `secrets`.
@@ -109,8 +109,8 @@ ROUTER=claude@188.213.199.120 PORT=47291 KEY=~/.ssh/<key> bash deploy/routeros/d
 - محتوای پشتیبان واقعی و کاربرگ‌ها اضافه نشده‌اند.
 - شماره‌های اضطراری `safety.yaml` باید تطبیق داده شود.
 - تست زنده با بله و مدل انجام نشده؛ منتظر توکن تازه و کلید API است.
-- **وضعیت فعلی (۲۰۲۶-۱۱-۱۱، ۱۹:۴۵):** بازو روی B **روشن** است (`start-on-boot=yes`، `restart-policy=on-failure`).
-  - مدل: `gemini` / `gemini-3.8-flash`؛ مدل 2.5-flash برای کاربران جدید بسته است. کلید از NL3 کار می‌کند ولی از IP ایران 403 می‌گیرد.
+- **وضعیت فعلی (۲۰۲۶-۱۱-۱۱، ۱۹:۴۵):** بازو روی روتر ایران **روشن** است (`start-on-boot=yes`، `restart-policy=on-failure`).
+  - مدل: `gemini` / `gemini-3.8-flash`؛ مدل 2.5-flash برای کاربران جدید بسته است. کلید از سرور خارج کار می‌کند ولی از IP ایران 403 می‌گیرد.
   - `ADMIN_IDS=186879241(@admin_mehreman),279156483(@nargesnemati82),1183285151(@counseling_az)`.
   - `REFERRAL_CHAT_ID=186879241,279156483`: فرم ارجاع برای همه‌ی این شناسه‌ها فرستاده می‌شود و اولی مسئول اصلی است.
   - پوشه‌ی knowledge هنوز خالی است، پس پرسش‌ها فعلاً «خارج از دامنه» می‌گیرند.

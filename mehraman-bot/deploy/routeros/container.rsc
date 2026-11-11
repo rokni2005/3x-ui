@@ -7,7 +7,7 @@
   /container remove [find name=mehraman-bot]
   :delay 3s
 }
-/container add name=mehraman-bot file=images/mehraman-bot.tar interface=veth-mehraman root-dir=/mehraman-rootdir mountlists=mehraman-state envlists=mehraman-env dns=172.31.0.1 logging=yes start-on-boot=yes restart-policy=on-failure comment="Mehraman Bale bot (not NK VPN)"
+/container add name=mehraman-bot file=images/mehraman-bot.tar interface=veth-mehraman root-dir=/mehraman-rootdir mountlists=mehraman-state envlists=mehraman-env dns=172.31.0.1 logging=yes start-on-boot=yes restart-policy=on-failure comment="Mehraman Bale bot"
 # RouterOS 7.24: ویژگی status ندارد؛ پس از استخراج ایمیج، stopped=true می‌شود
 :local j 0
 :delay 5s

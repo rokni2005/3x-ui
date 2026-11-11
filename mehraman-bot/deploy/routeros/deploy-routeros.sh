@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # استقرار بازوی مهرمان روی میکروتیک (معادل deploy-serverB.sh برای RouterOS).
 # روی کامپیوتر ادمین اجرا می‌شود (Git Bash/لینوکس) با دسترسی SSH کلیدی به روتر:
-#   ROUTER=claude@188.213.199.120 PORT=47291 KEY=~/.ssh/<key> bash deploy/routeros/deploy-routeros.sh install
+#   ROUTER=<user>@<ROUTER> PORT=<PORT> KEY=~/.ssh/<key> bash deploy/routeros/deploy-routeros.sh install
 #   ... deploy-routeros.sh update     # فقط ایمیج نو (محتوا و دیتابیس می‌مانند)
 #   ... deploy-routeros.sh secrets    # فقط تنظیم/تعویض توکن و کلید
 #   ... deploy-routeros.sh check      # نمایش لاگ‌های اخیر بازو از لاگ روتر
