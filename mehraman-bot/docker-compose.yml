@@ -1,0 +1,11 @@
+services:
+  mehraman-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+      - ./knowledge:/app/knowledge
+      - ./content:/app/content

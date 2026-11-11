@@ -1,0 +1,12 @@
+# اسرار و داده‌های کاربران هرگز در گیت نرود
+.env
+data/*
+!data/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# محتوای پشتیبان (داخلی/محرمانه): فقط README و نمونه در گیت بماند
+knowledge/*
+!knowledge/README.md
+!knowledge/_example.md
