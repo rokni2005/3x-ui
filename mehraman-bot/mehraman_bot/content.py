@@ -17,6 +17,7 @@ class Worksheet:
     minutes: int = 10
     steps: list[str] = field(default_factory=list)
     reflection: str = ""
+    attachments: list[dict] = field(default_factory=list)  # [{kind: photo|document|..., file_id, text}]
 
 
 @dataclass
@@ -51,7 +52,8 @@ def validate_data(data, kind: str | None = None) -> tuple[str | None, list[str]]
     errs: list[str] = []
     if not isinstance(data, dict):
         return None, ["ساختار فایل باید یک YAML از نوع «کلید: مقدار» باشد."]
-    kind = kind or ("course" if "stations" in data else "worksheet" if "steps" in data else None)
+    kind = kind or ("course" if "stations" in data else
+                    "worksheet" if ("steps" in data or "attachments" in data) else None)
     if kind is None:
         return None, ["نوع فایل مشخص نیست: دوره باید کلید stations و کاربرگ باید کلید steps داشته باشد."]
     if kind == "course":
@@ -72,11 +74,17 @@ def validate_data(data, kind: str | None = None) -> tuple[str | None, list[str]]
             if s.get("worksheets") is not None and not isinstance(s["worksheets"], list):
                 errs.append(f"ایستگاه {i}: worksheets باید فهرست باشد.")
     else:
-        for k in ("id", "station", "title", "steps"):
+        for k in ("id", "station", "title"):
             if not data.get(k):
                 errs.append(f"کلید «{k}» لازم است.")
-        if not isinstance(data.get("steps"), list) or not all(isinstance(x, str) for x in data.get("steps") or []):
+        steps, atts = data.get("steps"), data.get("attachments")
+        if not steps and not atts:
+            errs.append("کاربرگ باید گام (steps) یا پیوست (attachments: فایل/عکس) داشته باشد.")
+        if steps is not None and (not isinstance(steps, list) or not all(isinstance(x, str) for x in steps)):
             errs.append("steps باید فهرستی از متن‌ها (هر گام یک خط) باشد.")
+        if atts is not None and (not isinstance(atts, list)
+                                 or not all(isinstance(a, dict) and a.get("file_id") for a in atts)):
+            errs.append("attachments باید فهرستی از پیوست‌ها با file_id باشد (از پنل مدیریت اضافه کنید).")
     return kind, errs
 
 
@@ -135,7 +143,8 @@ class Content:
             self.worksheets[str(data["id"])] = Worksheet(
                 id=str(data["id"]), station=str(data["station"]), title=data["title"],
                 purpose=data.get("purpose", ""), minutes=int(data.get("minutes", 10)),
-                steps=data["steps"], reflection=data.get("reflection", ""))
+                steps=data.get("steps") or [], reflection=data.get("reflection", ""),
+                attachments=data.get("attachments") or [])
         pf = self.dir / "persona.md"
         self.persona = pf.read_text(encoding="utf-8") if pf.exists() else ""
         for attr, name in (("messages", "messages.yaml"), ("safety", "safety.yaml")):

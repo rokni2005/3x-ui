@@ -20,10 +20,16 @@ ROOT = Path(__file__).resolve().parents[1]
 class FakeClient:
     def __init__(self):
         self.sent = []  # (chat_id, text, markup)
+        self.media = []  # (chat_id, item) — عکس/فایل/متنِ ارسال‌شده با send_media
         self.files = {}
 
     def send_message(self, chat_id, text, markup=None):
         self.sent.append((chat_id, text, markup))
+
+    def send_media(self, chat_id, item, markup=None):
+        if chat_id == 404:
+            raise RuntimeError("blocked")
+        self.media.append((chat_id, item))
 
     def answer_callback(self, *a, **k): pass
     def typing(self, *a): pass
@@ -220,7 +226,8 @@ def test_reminders_fire_once_per_day(env):
     assert bot.send_due_reminders(at(20, 0)) == 0
     assert bot.send_due_reminders(at(20, 31)) == 1
     assert bot.send_due_reminders(at(21, 0)) == 0
-    assert "چراغ تشخیص" in client.last(5)[1]
+    assert "چراغ تشخیص" in client.sent[-2][1]          # پیام روزانه
+    assert client.last(5)[1].startswith("📝")             # و خودِ کاربرگ امروز، خودکار
 
 
 def test_custom_and_off_reminder(env):

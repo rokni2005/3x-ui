@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from . import safety
-from .bale import BaleClient, inline_keyboard, reply_keyboard
+from .bale import BaleClient, extract_media, inline_keyboard, reply_keyboard
 from .config import Config
 from .admin_panel import BTN_ADMIN, AdminMixin
 from .content import Content, Station, validate_data
@@ -87,6 +87,12 @@ class Bot(AdminMixin):
         chat_id = msg["chat"]["id"]
         frm = msg.get("from") or {}
         user = self.db.ensure_user(chat_id, frm.get("first_name", ""), frm.get("username", "") or "")
+        if self.is_admin(chat_id):  # عکس/فایلِ ادمین برای ارسال گروهی یا کاربرگ
+            media = extract_media(msg)
+            if media and media["kind"] != "text":
+                state, data = self.db.state(chat_id)
+                if state in ("adm_b_msg", "adm_w_steps"):
+                    return self.admin_state_media(chat_id, media, state, data)
         if msg.get("document"):
             return self._on_document(chat_id, msg)
         text = (msg.get("text") or "").strip()
@@ -103,6 +109,11 @@ class Bot(AdminMixin):
         admin_cmd = self.is_admin(chat_id) and cmd in ADMIN_CMDS
         if admin_cmd:
             return self._admin_cmd(chat_id, cmd, arg.strip())
+        menu_btns = {BTN_PRACTICE, BTN_MAP, BTN_ASK, BTN_COUNSELOR, BTN_REMINDER, BTN_ABOUT, BTN_ADMIN}
+        if self.is_admin(chat_id) and not cmd and text not in menu_btns:  # مراحل پنل مدیریت (حتی بدون رضایت‌نامه)
+            state, data = self.db.state(chat_id)
+            if state.startswith("adm_") and self.admin_state_text(chat_id, text, state, data):
+                return
         if not user["consent"]:
             return self.cmd_start(chat_id)
 
@@ -284,14 +295,17 @@ class Bot(AdminMixin):
             if not u["consent"] or not u["reminder_time"] or u["last_reminder_day"] == day:
                 continue
             if u["reminder_time"] <= hhmm:  # اگر بازو لحظه‌ای خاموش بوده، همان روز جبران می‌شود
+                # اول علامت بزن تا اگر ارسال وسط کار خطا داد، همان روز دوباره فرستاده نشود
+                self.db.update_user(u["chat_id"], last_reminder_day=day)
                 st = self._station(u)
                 text = self.m("reminder", name=u["name"] or "", station=st.name if st else "")
                 try:
-                    self.say(u["chat_id"], text, inline_keyboard([[("📝 تمرین امروز", "practice:1")]]))
+                    self.say(u["chat_id"], text)
+                    # پیام روزانه‌ی دوره: کاربرگ/تمرین بعدیِ ایستگاه کاربر خودکار فرستاده می‌شود
+                    self.cmd_practice(u["chat_id"])
                     sent += 1
                 except Exception:
-                    log.warning("reminder failed for %s", u["chat_id"])
-                self.db.update_user(u["chat_id"], last_reminder_day=day)
+                    log.warning("daily send failed for %s", u["chat_id"])
         return sent
 
     # ───────────── تمرین ─────────────
@@ -308,12 +322,22 @@ class Bot(AdminMixin):
             text = f"📝 {w.title}\n⏱ حدود {w.minutes} دقیقه\n"
             if w.purpose:
                 text += f"\n🎯 {w.purpose}\n"
-            text += f"\n{steps}"
+            if steps:
+                text += f"\n{steps}"
             if w.reflection:
                 text += f"\n\n💭 {w.reflection}"
-            return self.say(chat_id, text, inline_keyboard([
+            kb = inline_keyboard([
                 [("✅ انجام دادم", f"done:{w.id}")],
-                [("🔁 تمرین دیگر", f"more:{w.id}"), ("❓ سؤال دارم", "profile:1")]]))
+                [("🔁 تمرین دیگر", f"more:{w.id}"), ("❓ سؤال دارم", "profile:1")]])
+            if not w.attachments:
+                return self.say(chat_id, text, kb)
+            self.say(chat_id, text)
+            for a in w.attachments:  # فایل/عکس کاربرگ
+                try:
+                    self.client.send_media(chat_id, a)
+                except Exception:
+                    log.warning("worksheet %s attachment failed for %s", w.id, chat_id)
+            return self.say(chat_id, self.content.msg("worksheet_after_files", "وقتی انجامش دادید، بزنید 👇"), kb)
         if st.weekly_tasks:
             task = st.weekly_tasks[int(time.time() // 86400) % len(st.weekly_tasks)]
             return self.say(chat_id, f"📌 تمرین امروز در ایستگاه «{st.name}»:\n\n{task}",

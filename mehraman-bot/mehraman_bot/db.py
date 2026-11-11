@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS unanswered(
   id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, ts INTEGER);
 CREATE TABLE IF NOT EXISTS questions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, station_order INTEGER, ts INTEGER);
+CREATE TABLE IF NOT EXISTS broadcasts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER, audience TEXT, payload TEXT,
+  total INTEGER, sent INTEGER DEFAULT 0, failed INTEGER DEFAULT 0, ts INTEGER);
 """
 
 
@@ -71,6 +74,42 @@ class DB:
 
     def all_users(self) -> list[sqlite3.Row]:
         return self._q("SELECT * FROM users").fetchall()
+
+    def audience(self, station_order: int | None = None) -> list[int]:
+        """مخاطبان (رضایت داده‌اند)؛ با station_order فقط کسانی که در آن ایستگاه دوره هستند."""
+        if station_order is None:
+            rows = self._q("SELECT chat_id FROM users WHERE consent=1 ORDER BY chat_id").fetchall()
+        else:
+            rows = self._q("SELECT chat_id FROM users WHERE consent=1 AND course_id!='' AND station_order=? "
+                           "ORDER BY chat_id", (station_order,)).fetchall()
+        return [r[0] for r in rows]
+
+    def find_users(self, refs: list[str]) -> tuple[list[sqlite3.Row], list[str]]:
+        """refs: @نام‌کاربری یا شناسه‌ی عددی ← (کاربران پیداشده، مواردی که پیدا نشد)"""
+        found, missing, seen = [], [], set()
+        for ref in refs:
+            r = ref.strip().lstrip("@")
+            if not r:
+                continue
+            if r.lstrip("-").isdigit():
+                u = self.user(int(r))
+            else:
+                u = self._q("SELECT * FROM users WHERE lower(username)=lower(?)", (r,)).fetchone()
+            if u and u["chat_id"] not in seen:
+                seen.add(u["chat_id"])
+                found.append(u)
+            elif not u:
+                missing.append(ref.strip())
+        return found, missing
+
+    # ── ارسال گروهی ──
+    def add_broadcast(self, admin_id: int, audience: str, payload: dict, total: int) -> int:
+        return self._q("INSERT INTO broadcasts(admin_id,audience,payload,total,ts) VALUES(?,?,?,?,?)",
+                       (admin_id, audience, json.dumps(payload, ensure_ascii=False), total,
+                        int(time.time()))).lastrowid
+
+    def finish_broadcast(self, bid: int, sent: int, failed: int) -> None:
+        self._q("UPDATE broadcasts SET sent=?, failed=? WHERE id=?", (sent, failed, bid))
 
     # ── پیشرفت ──
     def mark_done(self, chat_id: int, station_id: str, worksheet_id: str,
