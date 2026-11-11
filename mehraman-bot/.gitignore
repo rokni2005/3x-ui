@@ -10,3 +10,6 @@ __pycache__/
 knowledge/*
 !knowledge/README.md
 !knowledge/_example.md
+
+# RouterOS image build output
+*.tar

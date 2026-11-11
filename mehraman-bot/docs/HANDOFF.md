@@ -33,7 +33,47 @@
 `docs/UPDATING_WITH_AI.md`. ادمین با «🛠 پنل مدیریت» محتوا/کاربرگ اضافه می‌کند. تغییر لحن: `content/persona.md`. تغییر مدل: `.env`.
 
 ## اجرا
-`cp .env.example .env` ← پر کردن ← `python -m mehraman_bot.main --check` ← `python -m mehraman_bot.main`. تست: `pip install -r requirements-dev.txt && pytest` (۲۲ تست). کانتینر: `Dockerfile`, `docker-compose.yml`. نکته‌ی میکروتیک: ایمیج باید برای معماری روتر ساخته شود.
+- **محلی:** `cp .env.example .env` ← پر کردن ← `python -m mehraman_bot.main --check` ← `python -m mehraman_bot.main`. تست: `pip install -r requirements-dev.txt && pytest` (۲۲ تست).
+- **Docker معمولی:** `Dockerfile` و `docker-compose.yml` و `deploy/deploy-serverB.sh`.
+- **میکروتیک (محل استقرار اصلی):** پوشه‌ی `deploy/routeros/` (بخش بعد).
+
+## استقرار روی میکروتیک (RouterOS container)
+**محل:** سرور B (CHR، x86_64/amd64، RouterOS 7.24.4). دلیل انتخاب: سرور ایران است (بله داخلی است) و نقش «روتر سرویس‌ها» دارد (ربات‌ها/دیتابیس)، نه نقطه‌ی اتصال کاربران VPN، پس کمتر در معرض فیلتر است. بررسی ۱۴۰۵/۰۸/۲۰: پکیج container نصب، device-mode container=yes، ۲۱٫۶ گیگ دیسک آزاد، ~۴۷۰ مگ RAM آزاد از ۲ گیگ، دسترسی به `tapi.bale.ai` برقرار.
+
+| فایل | نقش |
+|---|---|
+| `deploy/routeros/build_image_tar.py` | ساخت ایمیج **بدون Docker**: `python:3.12-slim` (Docker Hub) + یک لایه (چرخ‌های httpx/PyYAML برای cp312 + کد + نسخه‌ی اولیه‌ی محتوا در `/app/_seed`) ← tar با قالب `docker save`. `--arch arm64` برای روترهای ARM. |
+| `deploy/routeros/entrypoint.sh` | نقطه‌ی ورود کانتینر: پوشه‌ی ماندگار `/srv/mehraman` را می‌سازد، بار اول `content/` و `knowledge/` را از `_seed` کپی می‌کند، `DATA_DIR/CONTENT_DIR/KNOWLEDGE_DIR` را تنظیم و بازو را اجرا می‌کند. |
+| `deploy/routeros/mehraman.rsc` | معادل compose (یک‌بار): veth `veth-mehraman` با IP ‏`172.31.0.23` روی `BR-Container`، mount ماندگار `/mehraman-state` ← `/srv/mehraman`، envهای غیرمحرمانه، و mangle که ترافیک خارجی کانتینر را به جدول `EXT-DE` (خروجی هلند NL3) می‌فرستد. |
+| `deploy/routeros/container.rsc` | ساخت/بازسازی کانتینر از `images/mehraman-bot.tar` با `start-on-boot=yes` و `restart-policy=on-failure`؛ پوشه‌ی ماندگار دست نمی‌خورد. |
+| `deploy/routeros/deploy-routeros.sh` | معادل `deploy-serverB.sh`، از کامپیوتر ادمین با SSH: `install` / `update` / `secrets` / `check`. |
+
+**تفاوت با Docker:**
+- RouterOS فقط پوشه mount می‌کند و فایل `.env` ندارد؛ اسرار در `/container envs` (لیست `mehraman-env`) هستند. `load_dotenv` چون `.env` نیست کاری نمی‌کند و متغیرهای محیطی خوانده می‌شوند.
+- کانتینر با root اجرا می‌شود چون پوشه‌های mount روتر مال root هستند (در Docker کاربر `bot` بود). از شبکه‌ی بیرون فقط اتصال خروجی دارد؛ هیچ پورتی باز نمی‌شود (long‑polling).
+- لاگ stdout در لاگ روتر است: `/log print where topics~"container"`. توکن در لاگ نمی‌آید (لاگ httpx خاموش است).
+
+**مسیر شبکه:** بله (IP ایران) مستقیم از B. API مدل‌ها IP ایران را رد می‌کنند، پس هر مقصد خارج از `IranSupernets` از جدول `EXT-DE` می‌رود: اول GRE به NL3 (هلند/ایرلند ‎83.141.72.255، تأییدشده برای Gemini)، با پشتیبان خودکار. `LLM_PROXY` لازم نیست.
+
+**نصب اول:**
+```bash
+ROUTER=claude@188.213.199.120 PORT=47291 KEY=~/.ssh/<key> bash deploy/routeros/deploy-routeros.sh install
+```
+**ارتقای کد:** همان دستور با `update`. ایمیج نو ساخته و آپلود می‌شود، کانتینر از نو ساخته می‌شود. دیتابیس و محتوای افزوده‌شده در `/mehraman-state` می‌مانند.
+**تعویض توکن/کلید:** با `secrets`.
+**نکته:** فایل‌های `content/` داخل گیت فقط بار اول کپی می‌شوند. برای اعمال تغییر بعدی آن‌ها روی سرور، یا از پنل مدیریت بازو استفاده کنید یا فایل را در `/mehraman-state/content/` روتر بگذارید (sftp) و کانتینر را restart کنید.
+
+**برگرداندن کامل:**
+```
+/container stop [find name=mehraman-bot]
+/container remove [find name=mehraman-bot]
+/ip firewall mangle remove [find comment~"Mehraman"]
+/interface bridge port remove [find interface=veth-mehraman]
+/interface veth remove veth-mehraman
+/container envs remove [find list=mehraman-env]
+/container mounts remove [find list=mehraman-state]
+```
+پوشه‌ی `/mehraman-state` (دیتابیس کاربران) جدا و فقط پس از بکاپ پاک شود.
 
 ## تصمیم‌های طراحی که باید حفظ شوند
 - بازو **رابط** است؛ منطق/داده قفل بازو نشود (وب‌اپ بعدی همان محتوا/DB را می‌خواند).
@@ -43,5 +83,13 @@
 - تحلیل گلوگاه/فرضیه‌سازی کامل عمداً **پیاده نشده**: منتظر نسخه‌ی مبنای «الگوی توسعه وجودی» و «الگوی خانواده».
 - قیمت‌ها در کد/مدل ثابت نشوند (`content/faq.yaml`).
 
+## مشکلات شناخته‌شده
+- اگر توکن یا کلید تنظیم نباشد، بازو با کد ۲ خارج می‌شود و `restart-policy=on-failure` آن را مدام دوباره اجرا می‌کند. پیام خطا در لاگ روتر دیده می‌شود.
+- توکن بله قبلاً در یک چت دیده شده است. باید از BotFather بله بازسازی شود.
+- ایمیج بر پایه‌ی `python:3.12-slim:latest` ساخته می‌شود؛ با هر بیلد، نسخه‌ی پچ پایتون ممکن است عوض شود.
+
 ## کارهای باز
-محتوای پشتیبان واقعی و کاربرگ‌ها اضافه نشده‌اند؛ شماره‌های اضطراری `safety.yaml` باید تطبیق داده شود؛ تست زنده با بله/مدل انجام نشده؛ ایمیج Docker هنوز ساخته/آزموده نشده.
+- محتوای پشتیبان واقعی و کاربرگ‌ها اضافه نشده‌اند.
+- شماره‌های اضطراری `safety.yaml` باید تطبیق داده شود.
+- تست زنده با بله و مدل انجام نشده؛ منتظر توکن تازه و کلید API است.
+- ایمیج RouterOS ساخته و بررسی شده (۱۲۲ مگ). اجرای روی B منتظر تأیید است.
